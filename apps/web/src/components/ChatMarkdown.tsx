@@ -82,7 +82,7 @@ import { usePreparedConnection } from "../state/session";
 import { previewEnvironment } from "../state/preview";
 import { useAtomCommand } from "../state/use-atom-command";
 import { useAtomQueryRunner } from "../state/use-atom-query-runner";
-import { writeTextToClipboard } from "../hooks/useCopyToClipboard";
+import { useCopyToClipboard, writeTextToClipboard } from "../hooks/useCopyToClipboard";
 import { isPreviewSupportedInRuntime } from "../previewStateStore";
 import {
   isBrowserPreviewFile,
@@ -362,8 +362,12 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tableRef = useRef<HTMLTableElement | null>(null);
   const [expanded, setExpanded] = useState(readInitialWordWrapSetting);
-  const [copied, setCopied] = useState(false);
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { copyToClipboard, isCopied: copied } = useCopyToClipboard<"markdown" | "csv">({
+    timeout: 1200,
+    target: "table",
+    onError: (cause, format) =>
+      reportMarkdownActionFailure({ operation: "copy-table", format }, cause),
+  });
   const expandLabel = expanded ? "Collapse table cells" : "Expand table cells";
   const copyLabel = copied ? "Copied" : "Copy table";
 
@@ -391,40 +395,20 @@ function MarkdownTable({ children, ...props }: React.ComponentProps<"table">) {
     setExpanded((value) => !value);
   }
 
-  const handleCopy = useCallback((format: "markdown" | "csv") => {
-    const table = containerRef.current?.querySelector("table");
-    if (!table) {
-      return;
-    }
-    const text =
-      format === "markdown"
-        ? serializeTableElementToMarkdown(table)
-        : serializeTableElementToCsv(table);
-    void writeTextToClipboard(text, "table")
-      .then((didCopy) => {
-        if (!didCopy) return;
-        if (copiedTimerRef.current != null) {
-          clearTimeout(copiedTimerRef.current);
-        }
-        setCopied(true);
-        copiedTimerRef.current = setTimeout(() => {
-          setCopied(false);
-          copiedTimerRef.current = null;
-        }, 1200);
-      })
-      .catch((cause) => {
-        reportMarkdownActionFailure({ operation: "copy-table", format }, cause);
-      });
-  }, []);
-
-  useEffect(
-    () => () => {
-      if (copiedTimerRef.current != null) {
-        clearTimeout(copiedTimerRef.current);
-        copiedTimerRef.current = null;
+  const handleCopy = useCallback(
+    (format: "markdown" | "csv") => {
+      const table = containerRef.current?.querySelector("table");
+      if (!table) {
+        return;
       }
+      copyToClipboard(
+        format === "markdown"
+          ? serializeTableElementToMarkdown(table)
+          : serializeTableElementToCsv(table),
+        format,
+      );
     },
-    [],
+    [copyToClipboard],
   );
 
   return (
@@ -590,46 +574,26 @@ function MarkdownCodeBlock({
   theme: "light" | "dark";
   children: ReactNode;
 }) {
-  const [copied, setCopied] = useState(false);
   const [wrapped, setWrapped] = useState(readInitialWordWrapSetting);
-  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { copyToClipboard, isCopied: copied } = useCopyToClipboard({
+    timeout: 1200,
+    target: "code block",
+    onError: (cause) =>
+      reportMarkdownActionFailure(
+        {
+          operation: "copy-code-block",
+          language,
+          ...(fenceTitle ? { fenceTitle } : {}),
+        },
+        cause,
+      ),
+  });
   const wrapLabel = wrapped ? "Disable line wrap" : "Wrap lines";
   const copyLabel = copied ? "Copied" : "Copy code";
 
   const handleCopy = useCallback(() => {
-    void writeTextToClipboard(code, "code block")
-      .then((didCopy) => {
-        if (!didCopy) return;
-        if (copiedTimerRef.current != null) {
-          clearTimeout(copiedTimerRef.current);
-        }
-        setCopied(true);
-        copiedTimerRef.current = setTimeout(() => {
-          setCopied(false);
-          copiedTimerRef.current = null;
-        }, 1200);
-      })
-      .catch((cause) => {
-        reportMarkdownActionFailure(
-          {
-            operation: "copy-code-block",
-            language,
-            ...(fenceTitle ? { fenceTitle } : {}),
-          },
-          cause,
-        );
-      });
-  }, [code, fenceTitle, language]);
-
-  useEffect(
-    () => () => {
-      if (copiedTimerRef.current != null) {
-        clearTimeout(copiedTimerRef.current);
-        copiedTimerRef.current = null;
-      }
-    },
-    [],
-  );
+    copyToClipboard(code, undefined);
+  }, [code, copyToClipboard]);
 
   return (
     <div

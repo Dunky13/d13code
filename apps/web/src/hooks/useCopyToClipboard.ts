@@ -27,46 +27,64 @@ export class ClipboardWriteError extends Schema.TaggedErrorClass<ClipboardWriteE
 /**
  * `navigator.clipboard` only exists in secure contexts, so a phone or another
  * machine hitting the dev/remote server over plain http has no async clipboard
- * at all. The deprecated `execCommand("copy")` path still works there. Must run
- * inside the user gesture, hence no `await` before it.
+ * at all. The deprecated `execCommand("copy")` copies the document selection,
+ * which still works there.
+ *
+ * The text goes into a plain (non-editable) node rather than a textarea: an
+ * editable field has to be focused to be selected, and focusing one on iOS pops
+ * the software keyboard and steals focus from the composer. `white-space: pre`
+ * keeps newlines and indentation in the copied text.
+ *
+ * Only reliable inside the user gesture, so callers must reach it without an
+ * `await` in front — see `writeTextToClipboard`.
  */
 function copyViaExecCommand(value: string): boolean {
   if (typeof document === "undefined" || typeof document.execCommand !== "function") return false;
 
-  const textarea = document.createElement("textarea");
-  textarea.value = value;
-  // iOS Safari refuses to select a readonly/non-editable field.
-  textarea.contentEditable = "true";
-  textarea.readOnly = false;
-  textarea.setAttribute("aria-hidden", "true");
-  textarea.style.position = "fixed";
-  textarea.style.top = "0";
-  textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  document.body.appendChild(textarea);
+  const holder = document.createElement("pre");
+  holder.textContent = value;
+  holder.setAttribute("aria-hidden", "true");
+  holder.style.position = "fixed";
+  holder.style.top = "0";
+  holder.style.left = "0";
+  holder.style.opacity = "0";
+  holder.style.pointerEvents = "none";
+  holder.style.whiteSpace = "pre";
+  holder.style.userSelect = "text";
+  holder.style.webkitUserSelect = "text";
+  document.body.appendChild(holder);
 
   const selection = document.getSelection();
-  const previousRange = selection?.rangeCount ? selection.getRangeAt(0) : null;
-  const previouslyFocused = document.activeElement;
+  const previousRanges = selection
+    ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index))
+    : [];
   try {
     const range = document.createRange();
-    range.selectNodeContents(textarea);
+    range.selectNodeContents(holder);
     selection?.removeAllRanges();
     selection?.addRange(range);
-    textarea.focus({ preventScroll: true });
-    textarea.setSelectionRange(0, value.length);
     return document.execCommand("copy");
   } catch {
     return false;
   } finally {
-    textarea.remove();
+    holder.remove();
     selection?.removeAllRanges();
-    if (previousRange) selection?.addRange(previousRange);
-    // Copying must not steal focus from the composer.
-    if (typeof HTMLElement !== "undefined" && previouslyFocused instanceof HTMLElement) {
-      previouslyFocused.focus({ preventScroll: true });
-    }
+    // Copying must not eat the user's own text selection.
+    for (const range of previousRanges) selection?.addRange(range);
   }
+}
+
+/**
+ * Whether a copy can be attempted at all — either clipboard path counts, so an
+ * insecure context (phone/remote over http) still qualifies via the fallback.
+ * For gating UI only; a copy can still fail once attempted.
+ */
+export function canWriteToClipboard(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return false;
+  return (
+    navigator.clipboard?.writeText != null ||
+    (typeof document !== "undefined" && typeof document.execCommand === "function")
+  );
 }
 
 export async function writeTextToClipboard(value: string, target = "text") {
@@ -89,6 +107,8 @@ export async function writeTextToClipboard(value: string, target = "text") {
     await navigator.clipboard.writeText(value);
     return true;
   } catch (cause) {
+    // Best-effort only: the gesture may already have been spent by the await,
+    // in which case the browser refuses this too and we surface the real error.
     if (copyViaExecCommand(value)) return true;
     throw new ClipboardWriteError({
       target,

@@ -37,7 +37,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
-import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
+import { canWriteToClipboard, useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestampFormat";
 import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
@@ -575,10 +575,9 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
   const revealValue = shareablePairingUrl ?? pairingLink.credential;
   const isShareableHostedAppPairingUrl =
     shareablePairingUrl !== null && isHostedAppPairingUrl(shareablePairingUrl);
-  const canCopyToClipboard =
-    typeof window !== "undefined" &&
-    window.isSecureContext &&
-    navigator.clipboard?.writeText != null;
+  // Not gated on isSecureContext: pairing from a phone over plain http is the
+  // main way this dialog gets used, and the helper falls back to execCommand.
+  const canCopyToClipboard = canWriteToClipboard();
 
   const { copyToClipboard } = useCopyToClipboard<"code" | "hosted-link" | "link">({
     onCopy: (kind) => {

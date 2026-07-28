@@ -6,28 +6,27 @@ import {
   writeTextToClipboard,
 } from "./useCopyToClipboard";
 
-/** Minimal DOM stand-in for the insecure-context `execCommand("copy")` path. */
+/**
+ * Minimal DOM stand-in for the insecure-context `execCommand("copy")` path: the
+ * web unit project runs without a DOM environment, and `execCommand` copies
+ * whatever the current selection covers, so the stub tracks the selected node.
+ */
 function stubExecCommandDocument(): { copied: string[] } {
   const copied: string[] = [];
-  const textarea = {
-    value: "",
-    contentEditable: "",
-    readOnly: false,
-    style: {} as Record<string, string>,
-    setAttribute: () => {},
-    focus: () => {},
-    setSelectionRange: () => {},
-    remove: () => {},
-  };
+  const selectedText: string[] = [];
   vi.stubGlobal("document", {
-    activeElement: null,
     body: { appendChild: () => {} },
-    createElement: () => textarea,
-    createRange: () => ({ selectNodeContents: () => {} }),
+    createElement: () => ({ textContent: "", style: {}, setAttribute: () => {}, remove: () => {} }),
+    createRange: () => ({
+      selectNodeContents: (node: { textContent: string }) => {
+        selectedText.push(node.textContent);
+      },
+    }),
     getSelection: () => ({ rangeCount: 0, removeAllRanges: () => {}, addRange: () => {} }),
     execCommand: (command: string) => {
-      if (command !== "copy") return false;
-      copied.push(textarea.value);
+      const text = selectedText.at(-1);
+      if (command !== "copy" || text === undefined) return false;
+      copied.push(text);
       return true;
     },
   });
