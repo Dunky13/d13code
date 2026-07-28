@@ -518,6 +518,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const { onChangeDraftMessage, onUpdateInteractionMode, draftMessage, onSendMessage } = props;
 
   const handleSend = useCallback(async () => {
+    // Keyboard submit reaches this directly, so the busy check cannot live only
+    // on the button: sending now would leave the file link for the next message.
+    if (props.fileUploadsPending) return;
     const threadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
     if (inFlightThreadIdsRef.current.has(threadKey)) return;
     inFlightThreadIdsRef.current.add(threadKey);
@@ -536,6 +539,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     onSendMessage,
     props.environmentId,
     props.environmentLabel,
+    props.fileUploadsPending,
     props.selectedThread.id,
     props.selectedThread.title,
   ]);

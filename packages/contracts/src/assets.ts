@@ -36,13 +36,12 @@ const ATTACHMENT_UPLOAD_MAX_DATA_URL_CHARS = 14_000_000;
 export const AttachmentUploadInput = Schema.Struct({
   /**
    * Thread id when the composer already has a thread, draft id otherwise. Used
-   * as the stored filename prefix, so thread-scoped cleanup keeps working. Both
-   * are UUIDs; rejecting anything else keeps callers from parking uploads under
-   * fabricated owners that no thread lifecycle would ever clean up.
+   * as the stored filename prefix, so thread-scoped cleanup keeps working. The
+   * server sanitizes it into a path segment; abuse is bounded by the upload
+   * storage budget rather than by the id's shape, because a draft id has no
+   * server-side record to validate against.
    */
-  ownerId: TrimmedNonEmptyString.check(
-    Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i),
-  ),
+  ownerId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
   dataUrl: TrimmedNonEmptyString.check(Schema.isMaxLength(ATTACHMENT_UPLOAD_MAX_DATA_URL_CHARS)),
 });

@@ -7,10 +7,33 @@ import { ATTACHMENT_UPLOAD_MAX_BYTES, AttachmentUploadError } from "@t3tools/con
 import * as Effect from "effect/Effect";
 
 import { resolveAttachmentRelativePath } from "./attachmentPaths.ts";
-import { createAttachmentId } from "./attachmentStore.ts";
+import { ATTACHMENT_UPLOADS_DIRECTORY, createAttachmentId } from "./attachmentStore.ts";
 import { parseBase64DataUrl } from "./imageMime.ts";
 
 const EXTENSION_PATTERN = /\.([a-z0-9]{1,12})$/i;
+
+/** Total budget for uploaded documents that are not tied to a live thread yet. */
+export const ATTACHMENT_UPLOADS_TOTAL_MAX_BYTES = 512 * 1024 * 1024;
+
+async function uploadsDirectoryBytes(uploadsDir: string): Promise<number> {
+  let entries: Array<import("node:fs").Dirent>;
+  try {
+    entries = await NodeFSP.readdir(uploadsDir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let total = 0;
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    try {
+      const stats = await NodeFSP.stat(NodePath.join(uploadsDir, entry.name));
+      total += stats.size;
+    } catch {
+      // A file that vanished mid-sweep contributes nothing.
+    }
+  }
+  return total;
+}
 
 /**
  * Uploaded non-image files are stored as `<attachmentId><ext>` so the existing
@@ -61,22 +84,34 @@ export const persistUploadedAttachment = Effect.fn("persistUploadedAttachment")(
     return yield* fail("the owner id is not a safe attachment prefix.");
   }
 
+  const extension = inferUploadExtension({ name: input.name, mimeType: parsed.mimeType });
   const filePath = resolveAttachmentRelativePath({
     attachmentsDir: input.attachmentsDir,
-    relativePath: `${attachmentId}${inferUploadExtension({ name: input.name, mimeType: parsed.mimeType })}`,
+    relativePath: `${ATTACHMENT_UPLOADS_DIRECTORY}/${attachmentId}${extension}`,
   });
   if (!filePath) {
     return yield* fail("the resolved path escaped the attachments directory.");
   }
 
+  // Owner ids cannot be authenticated — a draft has no server-side record — so the
+  // uploads directory carries a total budget instead. It bounds what a client can
+  // park under owners that no thread lifecycle will ever clean up.
+  const uploadsDir = NodePath.dirname(filePath);
+  const usedBytes = yield* Effect.promise(() => uploadsDirectoryBytes(uploadsDir));
+  if (usedBytes + bytes.byteLength > ATTACHMENT_UPLOADS_TOTAL_MAX_BYTES) {
+    return yield* fail(
+      `the ${Math.floor(ATTACHMENT_UPLOADS_TOTAL_MAX_BYTES / (1024 * 1024))}MB upload storage budget is full; delete some threads first.`,
+    );
+  }
+
   yield* Effect.tryPromise({
     try: async () => {
-      await NodeFSP.mkdir(NodePath.dirname(filePath), { recursive: true });
+      await NodeFSP.mkdir(uploadsDir, { recursive: true });
       try {
         await NodeFSP.writeFile(filePath, bytes);
       } catch (cause) {
         // A partial write leaves a random-named file nothing will ever claim.
-        await NodeFSP.rm(filePath, { force: true }).catch(() => {});
+        await NodeFSP.rm(filePath, { force: true });
         throw cause;
       }
     },

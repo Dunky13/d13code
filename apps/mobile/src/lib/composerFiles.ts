@@ -20,6 +20,40 @@ export interface ReadComposerFile {
   readonly sizeBytes: number;
 }
 
+const IMAGE_EXTENSION_MIME_TYPES: Record<string, string> = {
+  avif: "image/avif",
+  bmp: "image/bmp",
+  gif: "image/gif",
+  heic: "image/heic",
+  heif: "image/heif",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  png: "image/png",
+  tif: "image/tiff",
+  tiff: "image/tiff",
+  webp: "image/webp",
+};
+
+/**
+ * Document pickers hand back optional MIME metadata; Android in particular can
+ * return `application/octet-stream` for a photo. Falling back to the extension
+ * keeps images on the attachment pipeline instead of the path handoff.
+ */
+export function resolveComposerFileMimeType(input: {
+  readonly name: string;
+  readonly mimeType: string | undefined;
+}): string {
+  const mimeType = input.mimeType?.toLowerCase() ?? "";
+  if (mimeType.length > 0 && mimeType !== "application/octet-stream") {
+    return mimeType;
+  }
+  const extension = /\.([a-z0-9]+)$/i.exec(input.name.trim())?.[1]?.toLowerCase();
+  if (extension && Object.hasOwn(IMAGE_EXTENSION_MIME_TYPES, extension)) {
+    return IMAGE_EXTENSION_MIME_TYPES[extension]!;
+  }
+  return mimeType.length > 0 ? mimeType : "application/octet-stream";
+}
+
 async function loadDocumentPicker() {
   try {
     return await import("expo-document-picker");
@@ -83,7 +117,7 @@ export async function pickComposerFiles(): Promise<{
     files.push({
       name,
       uri: asset.uri,
-      mimeType: asset.mimeType ?? "application/octet-stream",
+      mimeType: resolveComposerFileMimeType({ name, mimeType: asset.mimeType }),
     });
   }
 

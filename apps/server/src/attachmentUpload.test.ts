@@ -8,7 +8,7 @@ import { afterAll, describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { isPrunableAttachmentRelativePath } from "./attachmentStore.ts";
+import { ATTACHMENT_UPLOADS_DIRECTORY } from "./attachmentStore.ts";
 import { inferUploadExtension, persistUploadedAttachment } from "./attachmentUpload.ts";
 
 const createdDirs: string[] = [];
@@ -37,13 +37,12 @@ describe("AttachmentUploadInput", () => {
     dataUrl: "data:text/plain;base64,Ym9vbQ==",
   };
 
-  it("accepts thread and draft uuids", () => {
+  it("accepts thread and draft ids", () => {
     expect(decode(payload).ownerId).toBe(payload.ownerId);
   });
 
-  it("rejects fabricated owners that no thread lifecycle would clean up", () => {
-    expect(() => decode({ ...payload, ownerId: "spam-bucket" })).toThrow();
-    expect(() => decode({ ...payload, ownerId: "../../etc" })).toThrow();
+  it("rejects an empty owner id", () => {
+    expect(() => decode({ ...payload, ownerId: "   " })).toThrow();
   });
 });
 
@@ -94,7 +93,9 @@ describe("persistUploadedAttachment", () => {
         dataUrl: dataUrl("text/plain", "nope"),
       });
 
-      expect(NodePath.dirname(result.path)).toBe(NodePath.resolve(attachmentsDir));
+      expect(NodePath.dirname(result.path)).toBe(
+        NodePath.join(NodePath.resolve(attachmentsDir), ATTACHMENT_UPLOADS_DIRECTORY),
+      );
     }),
   );
 
@@ -115,7 +116,7 @@ describe("persistUploadedAttachment", () => {
     }),
   );
 
-  it.effect("stores under the owner id so thread cleanup can find it later", () =>
+  it.effect("stores uploads under the owner id in the uploads directory", () =>
     Effect.gen(function* () {
       const attachmentsDir = makeAttachmentsDir();
       const ownerId = "0e70cccb-51e2-49af-a022-146fbaeede55";
@@ -127,8 +128,24 @@ describe("persistUploadedAttachment", () => {
       });
 
       expect(NodePath.basename(result.path).startsWith(ownerId)).toBe(true);
-      // Uploads are not structured attachments, so revert pruning must skip them.
-      expect(isPrunableAttachmentRelativePath(NodePath.basename(result.path))).toBe(false);
+      // Revert pruning only walks the attachments root, so an upload nested one
+      // level down cannot be deleted while its message still references it.
+      expect(NodePath.basename(NodePath.dirname(result.path))).toBe(ATTACHMENT_UPLOADS_DIRECTORY);
+      expect(NodeFS.readdirSync(attachmentsDir)).toEqual([ATTACHMENT_UPLOADS_DIRECTORY]);
+    }),
+  );
+
+  it.effect("keeps an image-shaped document name out of the prunable root", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const result = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+        name: "report.png",
+        dataUrl: dataUrl("text/plain", "not really a png"),
+      });
+
+      expect(NodePath.basename(NodePath.dirname(result.path))).toBe(ATTACHMENT_UPLOADS_DIRECTORY);
     }),
   );
 

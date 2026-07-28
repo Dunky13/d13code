@@ -91,8 +91,10 @@ export function useThreadComposerState() {
     reportFailure: false,
   });
   // An in-flight upload is composer-busy: sending now would drop the file link
-  // into the next message instead of this one.
-  const [draftFileUploadsPending, setDraftFileUploadsPending] = useState(false);
+  // into the next message instead of this one. Counted, not flagged, so one
+  // finished batch cannot clear the flag while another is still running.
+  const [pendingFileUploadBatches, setPendingFileUploadBatches] = useState(0);
+  const draftFileUploadsPending = pendingFileUploadBatches > 0;
 
   useEffect(() => {
     ensureComposerDraftsLoaded();
@@ -233,7 +235,7 @@ export function useThreadComposerState() {
       return;
     }
 
-    setDraftFileUploadsPending(true);
+    setPendingFileUploadBatches((count) => count + 1);
     try {
       for (const pickedFile of picked.files) {
         const read = await readComposerFile(pickedFile);
@@ -291,7 +293,7 @@ export function useThreadComposerState() {
         );
       }
     } finally {
-      setDraftFileUploadsPending(false);
+      setPendingFileUploadBatches((count) => Math.max(0, count - 1));
     }
   }, [selectedThreadShell, uploadAttachment]);
 

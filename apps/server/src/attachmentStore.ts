@@ -97,21 +97,12 @@ export function resolveAttachmentPathById(input: {
 }
 
 /**
- * Revert pruning is driven by the attachments recorded on retained messages,
- * and only image attachments are recorded there. Uploaded documents live in
- * message text, so pruning must leave every non-image entry alone.
+ * Uploaded documents are referenced from message text, never from the structured
+ * attachments on a message row. Keeping them in their own directory means the
+ * revert prune — which is driven by those rows — cannot reach them, without
+ * having to guess a file's kind from its extension.
  */
-export function isPrunableAttachmentRelativePath(relativePath: string): boolean {
-  const normalized = normalizeAttachmentRelativePath(relativePath);
-  if (!normalized || normalized.includes("/")) {
-    return false;
-  }
-  const extensionIndex = normalized.lastIndexOf(".");
-  if (extensionIndex <= 0) {
-    return false;
-  }
-  return SAFE_IMAGE_FILE_EXTENSIONS.has(normalized.slice(extensionIndex).toLowerCase());
-}
+export const ATTACHMENT_UPLOADS_DIRECTORY = "uploads";
 
 export function parseAttachmentIdFromRelativePath(relativePath: string): string | null {
   const normalized = normalizeAttachmentRelativePath(relativePath);
