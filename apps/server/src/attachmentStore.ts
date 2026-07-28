@@ -96,6 +96,23 @@ export function resolveAttachmentPathById(input: {
   return null;
 }
 
+/**
+ * Revert pruning is driven by the attachments recorded on retained messages,
+ * and only image attachments are recorded there. Uploaded documents live in
+ * message text, so pruning must leave every non-image entry alone.
+ */
+export function isPrunableAttachmentRelativePath(relativePath: string): boolean {
+  const normalized = normalizeAttachmentRelativePath(relativePath);
+  if (!normalized || normalized.includes("/")) {
+    return false;
+  }
+  const extensionIndex = normalized.lastIndexOf(".");
+  if (extensionIndex <= 0) {
+    return false;
+  }
+  return SAFE_IMAGE_FILE_EXTENSIONS.has(normalized.slice(extensionIndex).toLowerCase());
+}
+
 export function parseAttachmentIdFromRelativePath(relativePath: string): string | null {
   const normalized = normalizeAttachmentRelativePath(relativePath);
   if (!normalized || normalized.includes("/")) {

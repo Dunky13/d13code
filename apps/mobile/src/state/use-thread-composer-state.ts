@@ -1,9 +1,10 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import {
   CommandId,
   MessageId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   type EnvironmentId,
   type ModelSelection,
   type ProviderInteractionMode,
@@ -19,7 +20,7 @@ import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { deriveActiveWorkStartedAt } from "@t3tools/shared/orchestrationTiming";
 
 import { makeQueuedMessageMetadata } from "../lib/commandMetadata";
-import { pickComposerFiles } from "../lib/composerFiles";
+import { pickComposerFiles, readComposerFile } from "../lib/composerFiles";
 import {
   convertPastedImagesToAttachments,
   pasteComposerClipboard,
@@ -27,6 +28,7 @@ import {
 } from "../lib/composerImages";
 import type { DraftComposerImageAttachment } from "../lib/composerImages";
 import { scopedThreadKey } from "../lib/scopedEntities";
+import { uuidv4 } from "../lib/uuid";
 import { buildThreadFeed } from "../lib/threadActivity";
 import { assetEnvironment } from "../state/assets";
 import { appAtomRegistry } from "../state/atom-registry";
@@ -88,6 +90,9 @@ export function useThreadComposerState() {
   const uploadAttachment = useAtomCommand(assetEnvironment.uploadAttachment, {
     reportFailure: false,
   });
+  // An in-flight upload is composer-busy: sending now would drop the file link
+  // into the next message instead of this one.
+  const [draftFileUploadsPending, setDraftFileUploadsPending] = useState(false);
 
   useEffect(() => {
     ensureComposerDraftsLoaded();
@@ -212,7 +217,8 @@ export function useThreadComposerState() {
   }, [composerDrafts, selectedThreadShell]);
 
   // Non-image files are uploaded once and referenced by path, so the agent
-  // reads them with its own tools instead of receiving the bytes inline.
+  // reads them with its own tools instead of receiving the bytes inline. Images
+  // picked here still ride the attachment pipeline, matching web.
   const onPickDraftFiles = useCallback(async () => {
     if (!selectedThreadShell) {
       return;
@@ -223,25 +229,69 @@ export function useThreadComposerState() {
     if (picked.error) {
       setPendingConnectionError(picked.error);
     }
-    for (const file of picked.files) {
-      const result = await uploadAttachment({
-        environmentId: selectedThreadShell.environmentId,
-        input: {
-          ownerId: selectedThreadShell.id,
-          name: file.name,
-          dataUrl: file.dataUrl,
-        },
-      });
-      if (result._tag === "Failure") {
-        if (!isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
-          setPendingConnectionError(
-            error instanceof Error ? error.message : `'${file.name}' could not be uploaded.`,
-          );
+    if (picked.files.length === 0) {
+      return;
+    }
+
+    setDraftFileUploadsPending(true);
+    try {
+      for (const pickedFile of picked.files) {
+        const read = await readComposerFile(pickedFile);
+        if (!read.file) {
+          if (read.error) {
+            setPendingConnectionError(read.error);
+          }
+          continue;
         }
-        continue;
+        const file = read.file;
+
+        if (file.mimeType.toLowerCase().startsWith("image/")) {
+          const attachments = getComposerDraftSnapshot(threadKey).attachments;
+          if (attachments.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+            setPendingConnectionError(
+              `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`,
+            );
+            continue;
+          }
+          appendComposerDraftAttachments(threadKey, [
+            {
+              id: uuidv4(),
+              type: "image",
+              name: file.name,
+              mimeType: file.mimeType,
+              sizeBytes: file.sizeBytes,
+              dataUrl: file.dataUrl,
+              previewUri: pickedFile.uri,
+            },
+          ]);
+          continue;
+        }
+
+        const result = await uploadAttachment({
+          environmentId: selectedThreadShell.environmentId,
+          input: {
+            ownerId: selectedThreadShell.id,
+            name: file.name,
+            dataUrl: file.dataUrl,
+          },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            setPendingConnectionError(
+              error instanceof Error ? error.message : `'${file.name}' could not be uploaded.`,
+            );
+          }
+          continue;
+        }
+        appendComposerDraftText(
+          threadKey,
+          serializeComposerFileLink(result.value.path, file.name),
+          { ensureLeadingBoundary: true },
+        );
       }
-      appendComposerDraftText(threadKey, serializeComposerFileLink(result.value.path, file.name));
+    } finally {
+      setDraftFileUploadsPending(false);
     }
   }, [selectedThreadShell, uploadAttachment]);
 
@@ -347,6 +397,7 @@ export function useThreadComposerState() {
     onChangeDraftMessage,
     onPickDraftImages,
     onPickDraftFiles,
+    draftFileUploadsPending,
     onPasteIntoDraft,
     onNativePasteImages,
     onRemoveDraftImage,

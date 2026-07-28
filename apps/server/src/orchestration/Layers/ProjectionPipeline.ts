@@ -50,6 +50,7 @@ import {
 } from "../Services/ProjectionPipeline.ts";
 import {
   attachmentRelativePath,
+  isPrunableAttachmentRelativePath,
   parseAttachmentIdFromRelativePath,
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment,
@@ -411,6 +412,9 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
   ) {
     const relativePath = entry.replace(/^[/\\]+/, "").replace(/\\/g, "/");
     if (relativePath.length === 0 || relativePath.includes("/")) {
+      return;
+    }
+    if (!isPrunableAttachmentRelativePath(relativePath)) {
       return;
     }
     const attachmentId = parseAttachmentIdFromRelativePath(relativePath);

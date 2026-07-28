@@ -777,6 +777,7 @@ function ThreadRouteContent(
           onChangeDraftMessage={composer.onChangeDraftMessage}
           onPickDraftImages={composer.onPickDraftImages}
           onPickDraftFiles={composer.onPickDraftFiles}
+          fileUploadsPending={composer.draftFileUploadsPending}
           onNativePasteImages={composer.onNativePasteImages}
           onRemoveDraftImage={composer.onRemoveDraftImage}
           serverConfig={serverConfig}

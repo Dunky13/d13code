@@ -107,6 +107,7 @@ export interface ThreadComposerProps {
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onPickDraftImages: () => Promise<void>;
   readonly onPickDraftFiles: () => Promise<void>;
+  readonly fileUploadsPending: boolean;
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
@@ -280,7 +281,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
   const hasContent = props.draftMessage.trim().length > 0 || props.draftAttachments.length > 0;
   const isExpanded = isFocused;
-  const canSend = hasContent;
+  // An in-flight upload still owes this draft a file link.
+  const canSend = hasContent && !props.fileUploadsPending;
 
   const onPressImage = useCallback(
     (uri: string) => {

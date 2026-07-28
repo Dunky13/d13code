@@ -3,18 +3,49 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { describe, expect, it } from "@effect/vitest";
+import { AttachmentUploadInput } from "@t3tools/contracts";
+import { afterAll, describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
+import { isPrunableAttachmentRelativePath } from "./attachmentStore.ts";
 import { inferUploadExtension, persistUploadedAttachment } from "./attachmentUpload.ts";
 
+const createdDirs: string[] = [];
+
 function makeAttachmentsDir(): string {
-  return NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-attachment-upload-"));
+  const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-attachment-upload-"));
+  createdDirs.push(dir);
+  return dir;
 }
+
+afterAll(() => {
+  for (const dir of createdDirs) {
+    NodeFS.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 function dataUrl(mimeType: string, contents: string): string {
   return `data:${mimeType};base64,${Buffer.from(contents, "utf8").toString("base64")}`;
 }
+
+describe("AttachmentUploadInput", () => {
+  const decode = Schema.decodeUnknownSync(AttachmentUploadInput);
+  const payload = {
+    ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+    name: "server.log",
+    dataUrl: "data:text/plain;base64,Ym9vbQ==",
+  };
+
+  it("accepts thread and draft uuids", () => {
+    expect(decode(payload).ownerId).toBe(payload.ownerId);
+  });
+
+  it("rejects fabricated owners that no thread lifecycle would clean up", () => {
+    expect(() => decode({ ...payload, ownerId: "spam-bucket" })).toThrow();
+    expect(() => decode({ ...payload, ownerId: "../../etc" })).toThrow();
+  });
+});
 
 describe("inferUploadExtension", () => {
   it("prefers the extension carried by the file name", () => {
@@ -81,6 +112,23 @@ describe("persistUploadedAttachment", () => {
 
       expect(failure._tag).toBe("AttachmentUploadError");
       expect(NodeFS.readdirSync(attachmentsDir)).toEqual([]);
+    }),
+  );
+
+  it.effect("stores under the owner id so thread cleanup can find it later", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const ownerId = "0e70cccb-51e2-49af-a022-146fbaeede55";
+      const result = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId,
+        name: "server.log",
+        dataUrl: dataUrl("text/plain", "boom"),
+      });
+
+      expect(NodePath.basename(result.path).startsWith(ownerId)).toBe(true);
+      // Uploads are not structured attachments, so revert pruning must skip them.
+      expect(isPrunableAttachmentRelativePath(NodePath.basename(result.path))).toBe(false);
     }),
   );
 

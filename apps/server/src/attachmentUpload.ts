@@ -72,7 +72,13 @@ export const persistUploadedAttachment = Effect.fn("persistUploadedAttachment")(
   yield* Effect.tryPromise({
     try: async () => {
       await NodeFSP.mkdir(NodePath.dirname(filePath), { recursive: true });
-      await NodeFSP.writeFile(filePath, bytes);
+      try {
+        await NodeFSP.writeFile(filePath, bytes);
+      } catch (cause) {
+        // A partial write leaves a random-named file nothing will ever claim.
+        await NodeFSP.rm(filePath, { force: true }).catch(() => {});
+        throw cause;
+      }
     },
     catch: () => fail("the file could not be written to disk."),
   });

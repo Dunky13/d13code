@@ -647,7 +647,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectSelectionRequired,
     phase,
     isConnecting,
-    isSendBusy,
+    isSendBusy: isSendBusyProp,
     isPreparingWorktree,
     environmentUnavailable,
     activePendingApproval,
@@ -752,6 +752,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     reportFailure: false,
   });
   const attachFileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingAttachmentUploads, setPendingAttachmentUploads] = useState(0);
+  const pendingAttachmentUploadsRef = useRef(0);
+  // Uploads resolve against one environment and one draft; both can change while
+  // an upload is in flight, and the resulting path is only valid for the pair it
+  // was created under.
+  const attachmentUploadContextRef = useRef<{
+    environmentId: EnvironmentId;
+    ownerId: string | null;
+  }>({ environmentId, ownerId: null });
+  // An in-flight upload is composer-busy: its link still has to land in this draft.
+  const isSendBusy = isSendBusyProp || pendingAttachmentUploads > 0;
 
   // ------------------------------------------------------------------
   // Model state
@@ -1332,6 +1343,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [composerImages, composerImagesRef]);
 
   useEffect(() => {
+    attachmentUploadContextRef.current = {
+      environmentId,
+      ownerId: activeThreadId ?? draftId,
+    };
+  }, [activeThreadId, draftId, environmentId]);
+
+  useEffect(() => {
     composerTerminalContextsRef.current = composerTerminalContexts;
   }, [composerTerminalContexts, composerTerminalContextsRef]);
 
@@ -1828,6 +1846,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (event?: { preventDefault: () => void }) => {
       if (noProviderAvailable) {
         event?.preventDefault();
+        return;
+      }
+      // Sending mid-upload would ship the prompt without the file and then drop
+      // the link into whatever draft is current when the upload lands.
+      if (pendingAttachmentUploadsRef.current > 0) {
+        event?.preventDefault();
+        toastManager.add({
+          type: "info",
+          title: "Still attaching files",
+          description: "Send again once the upload finishes.",
+        });
         return;
       }
       onSend(event);
@@ -2434,52 +2463,71 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       });
       return;
     }
+    const uploadEnvironmentId = environmentId;
 
-    for (const file of documents) {
-      if (file.size > ATTACHMENT_UPLOAD_MAX_BYTES) {
-        toastManager.add({
-          type: "error",
-          title: "Unable to attach file",
-          description: `'${file.name}' exceeds the ${ATTACHMENT_UPLOAD_SIZE_LIMIT_LABEL} upload limit.`,
+    pendingAttachmentUploadsRef.current += 1;
+    setPendingAttachmentUploads((count) => count + 1);
+    try {
+      for (const file of documents) {
+        if (file.size > ATTACHMENT_UPLOAD_MAX_BYTES) {
+          toastManager.add({
+            type: "error",
+            title: "Unable to attach file",
+            description: `'${file.name}' exceeds the ${ATTACHMENT_UPLOAD_SIZE_LIMIT_LABEL} upload limit.`,
+          });
+          continue;
+        }
+        const dataUrl = await readFileAsDataUrl(file).catch(() => null);
+        if (dataUrl === null) {
+          toastManager.add({
+            type: "error",
+            title: "Unable to attach file",
+            description: `'${file.name}' could not be read.`,
+          });
+          continue;
+        }
+        const result = await uploadComposerAttachment({
+          environmentId: uploadEnvironmentId,
+          input: { ownerId, name: file.name || "file", dataUrl },
         });
-        continue;
+        if (result._tag === "Failure") {
+          if (isAtomCommandInterrupted(result)) continue;
+          const error = squashAtomCommandFailure(result);
+          toastManager.add({
+            type: "error",
+            title: "Unable to attach file",
+            description:
+              error instanceof Error ? error.message : `'${file.name}' could not be uploaded.`,
+          });
+          continue;
+        }
+        // The path only resolves on the host that stored it, and only belongs in
+        // the draft it was attached to.
+        const current = attachmentUploadContextRef.current;
+        if (current.environmentId !== uploadEnvironmentId || current.ownerId !== ownerId) {
+          toastManager.add({
+            type: "error",
+            title: "Attachment discarded",
+            description: `'${file.name}' was uploaded to a different conversation; attach it again here.`,
+          });
+          return;
+        }
+        const inserted = insertComposerTextAtEnd(
+          serializeComposerFileLink(result.value.path, file.name),
+          { ensureLeadingBoundary: true },
+        );
+        if (!inserted) {
+          toastManager.add({
+            type: "error",
+            title: "Unable to add to chat",
+            description: "The composer is busy; try again once it is ready.",
+          });
+          return;
+        }
       }
-      const dataUrl = await readFileAsDataUrl(file).catch(() => null);
-      if (dataUrl === null) {
-        toastManager.add({
-          type: "error",
-          title: "Unable to attach file",
-          description: `'${file.name}' could not be read.`,
-        });
-        continue;
-      }
-      const result = await uploadComposerAttachment({
-        environmentId,
-        input: { ownerId, name: file.name || "file", dataUrl },
-      });
-      if (result._tag === "Failure") {
-        if (isAtomCommandInterrupted(result)) continue;
-        const error = squashAtomCommandFailure(result);
-        toastManager.add({
-          type: "error",
-          title: "Unable to attach file",
-          description:
-            error instanceof Error ? error.message : `'${file.name}' could not be uploaded.`,
-        });
-        continue;
-      }
-      const inserted = insertComposerTextAtEnd(
-        serializeComposerFileLink(result.value.path, file.name),
-        { ensureLeadingBoundary: true },
-      );
-      if (!inserted) {
-        toastManager.add({
-          type: "error",
-          title: "Unable to add to chat",
-          description: "The composer is busy; try again once it is ready.",
-        });
-        return;
-      }
+    } finally {
+      pendingAttachmentUploadsRef.current -= 1;
+      setPendingAttachmentUploads((count) => Math.max(0, count - 1));
     }
   };
 

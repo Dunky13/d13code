@@ -1,4 +1,7 @@
-import { ATTACHMENT_UPLOAD_MAX_BYTES } from "@t3tools/contracts";
+import {
+  ATTACHMENT_UPLOAD_MAX_BYTES,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+} from "@t3tools/contracts";
 
 import { estimateBase64ByteSize } from "./base64";
 
@@ -6,7 +9,15 @@ const UPLOAD_SIZE_LIMIT_LABEL = `${Math.round(ATTACHMENT_UPLOAD_MAX_BYTES / (102
 
 export interface PickedComposerFile {
   readonly name: string;
+  readonly uri: string;
+  readonly mimeType: string;
+}
+
+export interface ReadComposerFile {
+  readonly name: string;
+  readonly mimeType: string;
   readonly dataUrl: string;
+  readonly sizeBytes: number;
 }
 
 async function loadDocumentPicker() {
@@ -26,18 +37,16 @@ async function loadFileSystem() {
 }
 
 /**
- * Non-image files are uploaded and handed to the agent as a path, so they are
- * read as base64 here and never staged as chat attachments.
+ * Picks file references only. Payloads are read one at a time by the caller so a
+ * multi-select never holds several base64 blobs in memory at once.
  */
 export async function pickComposerFiles(): Promise<{
   readonly files: ReadonlyArray<PickedComposerFile>;
   readonly error: string | null;
 }> {
   let documentPicker: Awaited<ReturnType<typeof loadDocumentPicker>>;
-  let fileSystem: Awaited<ReturnType<typeof loadFileSystem>>;
   try {
     documentPicker = await loadDocumentPicker();
-    fileSystem = await loadFileSystem();
   } catch (error) {
     return {
       files: [],
@@ -45,10 +54,15 @@ export async function pickComposerFiles(): Promise<{
     };
   }
 
-  const result = await documentPicker.getDocumentAsync({
-    multiple: true,
-    copyToCacheDirectory: true,
-  });
+  let result: Awaited<ReturnType<typeof documentPicker.getDocumentAsync>>;
+  try {
+    result = await documentPicker.getDocumentAsync({
+      multiple: true,
+      copyToCacheDirectory: true,
+    });
+  } catch {
+    return { files: [], error: "The file picker could not be opened." };
+  }
   if (result.canceled) {
     return { files: [], error: null };
   }
@@ -58,31 +72,62 @@ export async function pickComposerFiles(): Promise<{
 
   for (const asset of result.assets) {
     const name = asset.name || "file";
+    if (files.length >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+      error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files at a time.`;
+      break;
+    }
     if (asset.size !== undefined && asset.size > ATTACHMENT_UPLOAD_MAX_BYTES) {
-      error = `'${name}' exceeds the ${UPLOAD_SIZE_LIMIT_LABEL} upload limit.`;
-      continue;
-    }
-    let base64: string;
-    try {
-      base64 = await new fileSystem.File(asset.uri).base64();
-    } catch {
-      error = `Failed to read '${name}'.`;
-      continue;
-    }
-    const sizeBytes = estimateBase64ByteSize(base64);
-    if (sizeBytes <= 0) {
-      error = `'${name}' is empty.`;
-      continue;
-    }
-    if (sizeBytes > ATTACHMENT_UPLOAD_MAX_BYTES) {
       error = `'${name}' exceeds the ${UPLOAD_SIZE_LIMIT_LABEL} upload limit.`;
       continue;
     }
     files.push({
       name,
-      dataUrl: `data:${asset.mimeType ?? "application/octet-stream"};base64,${base64}`,
+      uri: asset.uri,
+      mimeType: asset.mimeType ?? "application/octet-stream",
     });
   }
 
   return { files, error };
+}
+
+export async function readComposerFile(
+  file: PickedComposerFile,
+): Promise<{ readonly file: ReadComposerFile | null; readonly error: string | null }> {
+  let fileSystem: Awaited<ReturnType<typeof loadFileSystem>>;
+  try {
+    fileSystem = await loadFileSystem();
+  } catch (error) {
+    return {
+      file: null,
+      error: error instanceof Error ? error.message : "File attachments are unavailable right now.",
+    };
+  }
+
+  let base64: string;
+  try {
+    base64 = await new fileSystem.File(file.uri).base64();
+  } catch {
+    return { file: null, error: `Failed to read '${file.name}'.` };
+  }
+
+  const sizeBytes = estimateBase64ByteSize(base64);
+  if (sizeBytes <= 0) {
+    return { file: null, error: `'${file.name}' is empty.` };
+  }
+  if (sizeBytes > ATTACHMENT_UPLOAD_MAX_BYTES) {
+    return {
+      file: null,
+      error: `'${file.name}' exceeds the ${UPLOAD_SIZE_LIMIT_LABEL} upload limit.`,
+    };
+  }
+
+  return {
+    file: {
+      name: file.name,
+      mimeType: file.mimeType,
+      sizeBytes,
+      dataUrl: `data:${file.mimeType};base64,${base64}`,
+    },
+    error: null,
+  };
 }

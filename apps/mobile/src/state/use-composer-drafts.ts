@@ -276,14 +276,22 @@ export function setComposerDraftText(draftKey: string, value: string): void {
   });
 }
 
-export function appendComposerDraftText(draftKey: string, value: string): void {
+export function appendComposerDraftText(
+  draftKey: string,
+  value: string,
+  options?: { readonly ensureLeadingBoundary?: boolean },
+): void {
   updateComposerDrafts((current) => {
     const existing = normalizeDraft(current[draftKey]);
+    const needsLeadingSpace =
+      (options?.ensureLeadingBoundary ?? false) &&
+      existing.text.length > 0 &&
+      !/\s$/.test(existing.text);
     return {
       ...current,
       [draftKey]: {
         ...existing,
-        text: `${existing.text}${value}`,
+        text: `${existing.text}${needsLeadingSpace ? " " : ""}${value}`,
       },
     };
   });
