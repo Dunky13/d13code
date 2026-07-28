@@ -91,10 +91,12 @@ export function useThreadComposerState() {
     reportFailure: false,
   });
   // An in-flight upload is composer-busy: sending now would drop the file link
-  // into the next message instead of this one. Counted, not flagged, so one
-  // finished batch cannot clear the flag while another is still running.
-  const [pendingFileUploadBatches, setPendingFileUploadBatches] = useState(0);
-  const draftFileUploadsPending = pendingFileUploadBatches > 0;
+  // into the next message instead of this one. Tracked per thread and counted,
+  // so one finished batch neither unblocks another still running nor blocks a
+  // thread that has no upload of its own.
+  const [pendingFileUploadsByThreadKey, setPendingFileUploadsByThreadKey] = useState<
+    Readonly<Record<string, number>>
+  >({});
 
   useEffect(() => {
     ensureComposerDraftsLoaded();
@@ -235,7 +237,17 @@ export function useThreadComposerState() {
       return;
     }
 
-    setPendingFileUploadBatches((count) => count + 1);
+    const trackUploadBatch = (delta: number) =>
+      setPendingFileUploadsByThreadKey((current) => {
+        const next = (current[threadKey] ?? 0) + delta;
+        if (next <= 0) {
+          const { [threadKey]: _removed, ...rest } = current;
+          return rest;
+        }
+        return { ...current, [threadKey]: next };
+      });
+
+    trackUploadBatch(1);
     try {
       for (const pickedFile of picked.files) {
         const read = await readComposerFile(pickedFile);
@@ -293,7 +305,7 @@ export function useThreadComposerState() {
         );
       }
     } finally {
-      setPendingFileUploadBatches((count) => Math.max(0, count - 1));
+      trackUploadBatch(-1);
     }
   }, [selectedThreadShell, uploadAttachment]);
 
@@ -399,7 +411,9 @@ export function useThreadComposerState() {
     onChangeDraftMessage,
     onPickDraftImages,
     onPickDraftFiles,
-    draftFileUploadsPending,
+    draftFileUploadsPending: selectedThreadKey
+      ? (pendingFileUploadsByThreadKey[selectedThreadKey] ?? 0) > 0
+      : false,
     onPasteIntoDraft,
     onNativePasteImages,
     onRemoveDraftImage,

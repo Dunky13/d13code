@@ -15,8 +15,26 @@ const EXTENSION_PATTERN = /\.([a-z0-9]{1,12})$/i;
 /** Total budget for uploaded documents that are not tied to a live thread yet. */
 export const ATTACHMENT_UPLOADS_TOTAL_MAX_BYTES = 512 * 1024 * 1024;
 
+// Budget check and write have to be one critical section, otherwise two uploads
+// both read an under-budget total and both write. Uploads are rare and small in
+// number, so a single process-wide queue is enough; per-directory locks would
+// only matter if one process served many attachment roots.
+let uploadQueue: Promise<unknown> = Promise.resolve();
+
+function withUploadLock<A>(run: () => Promise<A>): Promise<A> {
+  const next = uploadQueue.then(run, run);
+  uploadQueue = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
+// Recomputed per upload rather than cached: thread deletion removes files behind
+// our back, so a cached total would drift. Cost is one stat per stored upload,
+// which stays trivial while the directory holds at most a few thousand files.
 async function uploadsDirectoryBytes(uploadsDir: string): Promise<number> {
-  let entries: Array<import("node:fs").Dirent>;
+  let entries;
   try {
     entries = await NodeFSP.readdir(uploadsDir, { withFileTypes: true });
   } catch {
@@ -36,9 +54,9 @@ async function uploadsDirectoryBytes(uploadsDir: string): Promise<number> {
 }
 
 /**
- * Uploaded non-image files are stored as `<attachmentId><ext>` so the existing
- * thread-scoped attachment cleanup keeps working; the extension only has to be
- * safe and recognizable to the agent that reads the file.
+ * The extension is cosmetic — it only has to be safe and recognizable to the
+ * agent that opens the file. Nothing infers a file's kind from it: uploads are
+ * told apart from image attachments by their directory, not their name.
  */
 export function inferUploadExtension(input: {
   readonly name: string;
@@ -61,7 +79,10 @@ export const persistUploadedAttachment = Effect.fn("persistUploadedAttachment")(
   readonly ownerId: string;
   readonly name: string;
   readonly dataUrl: string;
+  /** Overridable so a test can fill the budget without writing 512MB. */
+  readonly totalBudgetBytes?: number;
 }) {
+  const totalBudgetBytes = input.totalBudgetBytes ?? ATTACHMENT_UPLOADS_TOTAL_MAX_BYTES;
   const fail = (reason: string) => new AttachmentUploadError({ name: input.name, reason });
 
   const parsed = parseBase64DataUrl(input.dataUrl);
@@ -97,26 +118,31 @@ export const persistUploadedAttachment = Effect.fn("persistUploadedAttachment")(
   // uploads directory carries a total budget instead. It bounds what a client can
   // park under owners that no thread lifecycle will ever clean up.
   const uploadsDir = NodePath.dirname(filePath);
-  const usedBytes = yield* Effect.promise(() => uploadsDirectoryBytes(uploadsDir));
-  if (usedBytes + bytes.byteLength > ATTACHMENT_UPLOADS_TOTAL_MAX_BYTES) {
-    return yield* fail(
-      `the ${Math.floor(ATTACHMENT_UPLOADS_TOTAL_MAX_BYTES / (1024 * 1024))}MB upload storage budget is full; delete some threads first.`,
-    );
-  }
-
-  yield* Effect.tryPromise({
-    try: async () => {
-      await NodeFSP.mkdir(uploadsDir, { recursive: true });
-      try {
-        await NodeFSP.writeFile(filePath, bytes);
-      } catch (cause) {
-        // A partial write leaves a random-named file nothing will ever claim.
-        await NodeFSP.rm(filePath, { force: true });
-        throw cause;
-      }
-    },
+  const outcome = yield* Effect.tryPromise({
+    try: () =>
+      withUploadLock(async () => {
+        const usedBytes = await uploadsDirectoryBytes(uploadsDir);
+        if (usedBytes + bytes.byteLength > totalBudgetBytes) {
+          return "over-budget" as const;
+        }
+        await NodeFSP.mkdir(uploadsDir, { recursive: true });
+        try {
+          await NodeFSP.writeFile(filePath, bytes);
+        } catch (cause) {
+          // A partial write leaves a random-named file nothing will ever claim.
+          await NodeFSP.rm(filePath, { force: true });
+          throw cause;
+        }
+        return "written" as const;
+      }),
     catch: () => fail("the file could not be written to disk."),
   });
+
+  if (outcome === "over-budget") {
+    return yield* fail(
+      `the ${Math.floor(totalBudgetBytes / (1024 * 1024))}MB upload storage budget is full; delete some threads first.`,
+    );
+  }
 
   return { path: filePath };
 });

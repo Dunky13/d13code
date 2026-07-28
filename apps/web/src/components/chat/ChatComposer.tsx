@@ -2450,7 +2450,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     const images = files.filter((file) => file.type.startsWith("image/"));
     const documents = files.filter((file) => !file.type.startsWith("image/"));
     if (images.length > 0) {
-      addComposerImages(images);
+      // addComposerImages stages nothing without a thread; say so rather than
+      // letting the pick look like it worked.
+      if (!activeThreadId) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to attach images",
+          description: "Start the thread before attaching images.",
+        });
+      } else {
+        addComposerImages(images);
+      }
     }
     if (documents.length === 0) return;
 

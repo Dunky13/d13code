@@ -149,6 +149,31 @@ describe("persistUploadedAttachment", () => {
     }),
   );
 
+  it.effect("keeps concurrent uploads inside the storage budget", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      // Two 4-byte uploads against a budget that only fits one.
+      const upload = (name: string) =>
+        persistUploadedAttachment({
+          attachmentsDir,
+          ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+          name,
+          dataUrl: dataUrl("text/plain", "1234"),
+          totalBudgetBytes: 6,
+        }).pipe(Effect.exit);
+
+      const results = yield* Effect.all([upload("a.log"), upload("b.log")], {
+        concurrency: "unbounded",
+      });
+
+      const written = results.filter((result) => result._tag === "Success");
+      expect(written).toHaveLength(1);
+      expect(
+        NodeFS.readdirSync(NodePath.join(attachmentsDir, ATTACHMENT_UPLOADS_DIRECTORY)),
+      ).toHaveLength(1);
+    }),
+  );
+
   it.effect("rejects empty files", () =>
     Effect.gen(function* () {
       const attachmentsDir = makeAttachmentsDir();
