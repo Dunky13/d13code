@@ -24,12 +24,53 @@ export class ClipboardWriteError extends Schema.TaggedErrorClass<ClipboardWriteE
   }
 }
 
+/**
+ * `navigator.clipboard` only exists in secure contexts, so a phone or another
+ * machine hitting the dev/remote server over plain http has no async clipboard
+ * at all. The deprecated `execCommand("copy")` path still works there. Must run
+ * inside the user gesture, hence no `await` before it.
+ */
+function copyViaExecCommand(value: string): boolean {
+  if (typeof document === "undefined" || typeof document.execCommand !== "function") return false;
+
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  // iOS Safari refuses to select a readonly/non-editable field.
+  textarea.contentEditable = "true";
+  textarea.readOnly = false;
+  textarea.setAttribute("aria-hidden", "true");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+
+  const selection = document.getSelection();
+  const previousRange = selection?.rangeCount ? selection.getRangeAt(0) : null;
+  const previouslyFocused = document.activeElement;
+  try {
+    const range = document.createRange();
+    range.selectNodeContents(textarea);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    textarea.focus({ preventScroll: true });
+    textarea.setSelectionRange(0, value.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+    selection?.removeAllRanges();
+    if (previousRange) selection?.addRange(previousRange);
+    // Copying must not steal focus from the composer.
+    if (typeof HTMLElement !== "undefined" && previouslyFocused instanceof HTMLElement) {
+      previouslyFocused.focus({ preventScroll: true });
+    }
+  }
+}
+
 export async function writeTextToClipboard(value: string, target = "text") {
-  if (
-    typeof window === "undefined" ||
-    typeof navigator === "undefined" ||
-    !navigator.clipboard?.writeText
-  ) {
+  if (typeof window === "undefined" || typeof navigator === "undefined") {
     throw new ClipboardApiUnavailableError({
       target,
     });
@@ -37,10 +78,18 @@ export async function writeTextToClipboard(value: string, target = "text") {
 
   if (!value) return false;
 
+  if (!navigator.clipboard?.writeText) {
+    if (copyViaExecCommand(value)) return true;
+    throw new ClipboardApiUnavailableError({
+      target,
+    });
+  }
+
   try {
     await navigator.clipboard.writeText(value);
     return true;
   } catch (cause) {
+    if (copyViaExecCommand(value)) return true;
     throw new ClipboardWriteError({
       target,
       cause,

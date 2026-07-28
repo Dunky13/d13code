@@ -6,9 +6,57 @@ import {
   writeTextToClipboard,
 } from "./useCopyToClipboard";
 
+/** Minimal DOM stand-in for the insecure-context `execCommand("copy")` path. */
+function stubExecCommandDocument(): { copied: string[] } {
+  const copied: string[] = [];
+  const textarea = {
+    value: "",
+    contentEditable: "",
+    readOnly: false,
+    style: {} as Record<string, string>,
+    setAttribute: () => {},
+    focus: () => {},
+    setSelectionRange: () => {},
+    remove: () => {},
+  };
+  vi.stubGlobal("document", {
+    activeElement: null,
+    body: { appendChild: () => {} },
+    createElement: () => textarea,
+    createRange: () => ({ selectNodeContents: () => {} }),
+    getSelection: () => ({ rangeCount: 0, removeAllRanges: () => {}, addRange: () => {} }),
+    execCommand: (command: string) => {
+      if (command !== "copy") return false;
+      copied.push(textarea.value);
+      return true;
+    },
+  });
+  return { copied };
+}
+
 describe("writeTextToClipboard", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("falls back to execCommand when the async clipboard is missing", async () => {
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", {});
+    const { copied } = stubExecCommandDocument();
+
+    await expect(writeTextToClipboard("pnpm dev", "code block")).resolves.toBe(true);
+    expect(copied).toEqual(["pnpm dev"]);
+  });
+
+  it("falls back to execCommand when the async clipboard write rejects", async () => {
+    vi.stubGlobal("window", {});
+    vi.stubGlobal("navigator", {
+      clipboard: { writeText: vi.fn().mockRejectedValue(new Error()) },
+    });
+    const { copied } = stubExecCommandDocument();
+
+    await expect(writeTextToClipboard("pnpm dev", "code block")).resolves.toBe(true);
+    expect(copied).toEqual(["pnpm dev"]);
   });
 
   it("reports unavailable clipboard support with structural context", async () => {
