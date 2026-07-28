@@ -6,6 +6,7 @@ import {
   ClientSettingsSchema,
   ClientSettingsPatch,
   DEFAULT_SERVER_SETTINGS,
+  DEFAULT_WORKTREE_BRANCH_PREFIX,
   ServerSettings,
   ServerSettingsPatch,
 } from "./settings.ts";
@@ -176,6 +177,15 @@ describe("ServerSettings worktree defaults", () => {
     expect(
       decodeServerSettingsPatch({ newWorktreesStartFromOrigin: false }).newWorktreesStartFromOrigin,
     ).toBe(false);
+  });
+
+  it("defaults the worktree branch prefix for legacy configs", () => {
+    expect(decodeServerSettings({}).worktreeBranchPrefix).toBe(DEFAULT_WORKTREE_BRANCH_PREFIX);
+  });
+
+  it("keeps an explicitly empty prefix rather than restoring the default", () => {
+    expect(decodeServerSettings({ worktreeBranchPrefix: "" }).worktreeBranchPrefix).toBe("");
+    expect(decodeServerSettingsPatch({ worktreeBranchPrefix: "" }).worktreeBranchPrefix).toBe("");
   });
 });
 

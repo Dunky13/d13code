@@ -6,18 +6,19 @@ import type {
   VcsStatusResult,
   VcsStatusStreamEvent,
 } from "@t3tools/contracts";
+import { DEFAULT_WORKTREE_BRANCH_PREFIX } from "@t3tools/contracts";
 import * as Arr from "effect/Array";
 import * as Result from "effect/Result";
 import { detectSourceControlProviderFromRemoteUrl } from "./sourceControl.ts";
 
-export const WORKTREE_BRANCH_PREFIX = "t3code";
-// Canonical form is `t3code/<8 hex>`. Older mobile builds generated `t3code/<uuid>`
-// via Crypto.randomUUID() (always RFC 4122 v4), so the matcher also accepts exactly
+export { DEFAULT_WORKTREE_BRANCH_PREFIX };
+
+// Canonical token is 8 hex chars. Older mobile builds generated a full UUID via
+// Crypto.randomUUID() (always RFC 4122 v4), so the matcher also accepts exactly
 // that shape — version nibble `4`, variant nibble `[89ab]` — to keep those threads
 // eligible for branch regeneration without loosening beyond what was ever generated.
-const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(
-  `^${WORKTREE_BRANCH_PREFIX}\\/(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$`,
-);
+const TEMPORARY_WORKTREE_TOKEN_PATTERN =
+  /^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
 
 /**
  * Sanitize an arbitrary string into a valid, lowercase git refName fragment.
@@ -92,8 +93,42 @@ export function deriveLocalBranchNameFromRemoteRef(branchName: string): string {
   return branchName.slice(firstSeparatorIndex + 1);
 }
 
+/**
+ * Normalize a user-configured worktree branch prefix into a refName-safe
+ * namespace. Returns `""` when the prefix is blank or reduces to nothing,
+ * which means worktree branches are created without any namespace.
+ */
+export function sanitizeWorktreeBranchPrefix(rawPrefix: string): string {
+  return rawPrefix
+    .trim()
+    .toLowerCase()
+    .replace(/['"`]/g, "")
+    .replace(/[^a-z0-9/_-]+/g, "-")
+    .replace(/\/+/g, "/")
+    .replace(/-+/g, "-")
+    .slice(0, 32)
+    .replace(/^[./_-]+|[./_-]+$/g, "");
+}
+
+function applyWorktreeBranchPrefix(sanitizedPrefix: string, fragment: string): string {
+  return sanitizedPrefix.length === 0 ? fragment : `${sanitizedPrefix}/${fragment}`;
+}
+
+/**
+ * Strip `<prefix>/` from the front of a branch name, or `null` when it isn't there.
+ * An empty prefix matches nothing — a bare branch has no prefix to remove.
+ */
+function stripWorktreeBranchPrefix(branchName: string, sanitizedPrefix: string): string | null {
+  if (sanitizedPrefix.length === 0) {
+    return null;
+  }
+  const namespace = `${sanitizedPrefix}/`;
+  return branchName.startsWith(namespace) ? branchName.slice(namespace.length) : null;
+}
+
 export function buildTemporaryWorktreeBranchName(
   randomHex: (byteLength: number) => string,
+  rawPrefix: string = DEFAULT_WORKTREE_BRANCH_PREFIX,
 ): string {
   // Normalize to exactly 8 lowercase hex chars so a UUID-shaped callback
   // still produces the canonical temporary branch form.
@@ -101,11 +136,54 @@ export function buildTemporaryWorktreeBranchName(
     .toLowerCase()
     .replace(/[^0-9a-f]/g, "")
     .slice(0, 8);
-  return `${WORKTREE_BRANCH_PREFIX}/${token}`;
+  return applyWorktreeBranchPrefix(sanitizeWorktreeBranchPrefix(rawPrefix), token);
 }
 
-export function isTemporaryWorktreeBranch(refName: string): boolean {
-  return TEMP_WORKTREE_BRANCH_PATTERN.test(refName.trim().toLowerCase());
+/**
+ * Whether a branch is still an auto-generated worktree placeholder, and so is
+ * safe to rename once a real branch name has been generated.
+ *
+ * Matches the configured prefix *and* the built-in `t3code` one, so worktrees
+ * created before the prefix was changed keep working. When the configured
+ * prefix is empty, a bare `<8 hex>` branch counts as temporary — that is the
+ * shape this app generates in that mode, so it has to.
+ */
+export function isTemporaryWorktreeBranch(
+  refName: string,
+  rawPrefix: string = DEFAULT_WORKTREE_BRANCH_PREFIX,
+): boolean {
+  const normalized = refName.trim().toLowerCase();
+  const prefixes = new Set([
+    DEFAULT_WORKTREE_BRANCH_PREFIX,
+    sanitizeWorktreeBranchPrefix(rawPrefix),
+  ]);
+
+  return [...prefixes].some((prefix) => {
+    const token = prefix.length === 0 ? normalized : stripWorktreeBranchPrefix(normalized, prefix);
+    return token !== null && TEMPORARY_WORKTREE_TOKEN_PATTERN.test(token);
+  });
+}
+
+/**
+ * Turn a model-generated branch suggestion into the final worktree branch name,
+ * re-namespacing it under the configured prefix. Tolerates a suggestion that
+ * already carries the configured or built-in prefix so it isn't doubled up.
+ */
+export function buildGeneratedWorktreeBranchName(
+  raw: string,
+  rawPrefix: string = DEFAULT_WORKTREE_BRANCH_PREFIX,
+): string {
+  const normalized = raw
+    .trim()
+    .toLowerCase()
+    .replace(/^refs\/heads\//, "");
+  const sanitizedPrefix = sanitizeWorktreeBranchPrefix(rawPrefix);
+  const withoutPrefix =
+    stripWorktreeBranchPrefix(normalized, sanitizedPrefix) ??
+    stripWorktreeBranchPrefix(normalized, DEFAULT_WORKTREE_BRANCH_PREFIX) ??
+    normalized;
+
+  return applyWorktreeBranchPrefix(sanitizedPrefix, sanitizeBranchFragment(withoutPrefix));
 }
 
 /**
