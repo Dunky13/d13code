@@ -35,6 +35,12 @@ describe("serializeComposerFileLink", () => {
     );
   });
 
+  it("uses an explicit label when given one, escaping markdown syntax", () => {
+    expect(serializeComposerFileLink("/state/attachments/thr-1-uuid.log", "app [prod].log")).toBe(
+      "[app \\[prod\\].log](/state/attachments/thr-1-uuid.log)",
+    );
+  });
+
   it("preserves paths that legitimately start with an at sign", () => {
     expect(serializeComposerFileLink("@scope/package.json")).toBe(
       "[package.json](@scope/package.json)",

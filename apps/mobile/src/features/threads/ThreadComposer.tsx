@@ -106,6 +106,7 @@ export interface ThreadComposerProps {
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onPickDraftImages: () => Promise<void>;
+  readonly onPickDraftFiles: () => Promise<void>;
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
@@ -675,6 +676,25 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     [currentInteractionMode, currentRuntimeMode, providerOptionDescriptors],
   );
 
+  // ── Attachment menu ──────────────────────────────────────
+  const attachMenuActions = useMemo(
+    () => [
+      { id: "attach:photos", title: "Photos" },
+      { id: "attach:files", title: "Files" },
+    ],
+    [],
+  );
+
+  function handleAttachMenuAction(event: string) {
+    if (event === "attach:photos") {
+      void props.onPickDraftImages();
+      return;
+    }
+    if (event === "attach:files") {
+      void props.onPickDraftFiles();
+    }
+  }
+
   // ── Menu handlers ────────────────────────────────────────
   function handleModelMenuAction(event: string) {
     if (!event.startsWith("model:")) {
@@ -859,12 +879,16 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 fadeOpaque={toolbarFadeOpaque}
                 fadeTransparent={toolbarFadeTransparent}
               >
-                <ComposerToolbarButton
-                  accessibilityLabel="Add attachment"
-                  icon="plus"
-                  onPress={() => void props.onPickDraftImages()}
-                  showChevron={false}
-                />
+                <ControlPillMenu
+                  actions={attachMenuActions}
+                  onPressAction={({ nativeEvent }) => handleAttachMenuAction(nativeEvent.event)}
+                >
+                  <ComposerToolbarButton
+                    accessibilityLabel="Add attachment"
+                    icon="plus"
+                    showChevron={false}
+                  />
+                </ControlPillMenu>
                 <ControlPillMenu
                   actions={modelMenuActions}
                   onPressAction={({ nativeEvent }) => handleModelMenuAction(nativeEvent.event)}

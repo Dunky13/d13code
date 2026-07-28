@@ -29,6 +29,39 @@ export const AssetCreateUrlResult = Schema.Struct({
 });
 export type AssetCreateUrlResult = typeof AssetCreateUrlResult.Type;
 
+/** Non-image files are handed to agents as a path, so they are capped by disk size only. */
+export const ATTACHMENT_UPLOAD_MAX_BYTES = 10 * 1024 * 1024;
+const ATTACHMENT_UPLOAD_MAX_DATA_URL_CHARS = 14_000_000;
+
+export const AttachmentUploadInput = Schema.Struct({
+  /**
+   * Thread id when the composer already has a thread, draft id otherwise. Used
+   * as the stored filename prefix, so thread-scoped cleanup keeps working.
+   */
+  ownerId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(255)),
+  dataUrl: TrimmedNonEmptyString.check(Schema.isMaxLength(ATTACHMENT_UPLOAD_MAX_DATA_URL_CHARS)),
+});
+export type AttachmentUploadInput = typeof AttachmentUploadInput.Type;
+
+export const AttachmentUploadResult = Schema.Struct({
+  /** Absolute path on the environment host, for the agent to read with its own tools. */
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(ASSET_PATH_MAX_LENGTH)),
+});
+export type AttachmentUploadResult = typeof AttachmentUploadResult.Type;
+
+export class AttachmentUploadError extends Schema.TaggedErrorClass<AttachmentUploadError>()(
+  "AttachmentUploadError",
+  {
+    name: TrimmedNonEmptyString,
+    reason: TrimmedNonEmptyString,
+  },
+) {
+  override get message(): string {
+    return `Failed to upload '${this.name}': ${this.reason}`;
+  }
+}
+
 export class AssetWorkspaceContextNotFoundError extends Schema.TaggedErrorClass<AssetWorkspaceContextNotFoundError>()(
   "AssetWorkspaceContextNotFoundError",
   {

@@ -121,9 +121,11 @@ export function inferImageExtension(input: { mimeType: string; fileName?: string
     return fromMime;
   }
 
+  // Mime.getExtension returns a bare extension ("png"), not a dotted one.
   const fromMimeExtension = Mime.getExtension(input.mimeType);
-  if (fromMimeExtension && SAFE_IMAGE_FILE_EXTENSIONS.has(fromMimeExtension)) {
-    return fromMimeExtension;
+  const dottedMimeExtension = fromMimeExtension ? `.${fromMimeExtension.toLowerCase()}` : "";
+  if (SAFE_IMAGE_FILE_EXTENSIONS.has(dottedMimeExtension)) {
+    return dottedMimeExtension;
   }
 
   const fileName = input.fileName?.trim() ?? "";
