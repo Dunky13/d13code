@@ -117,6 +117,26 @@ describe("compressImageForStash", () => {
     expect(close).toHaveBeenCalled();
   });
 
+  it("measures a candidate against the budget without base64-encoding it", async () => {
+    // Candidates are accepted on a length computed from the blob size, so that
+    // computation has to match the data URL that eventually gets built —
+    // exactly, at the boundary, or an over-budget payload slips into storage.
+    const budgetChars = "data:image/webp;base64,".length + Math.ceil(900 / 3) * 4;
+    const blobSizes: number[] = [];
+    stubCanvasPipeline((quality) => {
+      const size = quality === 0.92 ? 900 : 3_000;
+      blobSizes.push(size);
+      return size;
+    });
+
+    const result = await compressImageForStash(makeFile(4_000_000), budgetChars);
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.image.dataUrl.length).toBe(budgetChars);
+    // Probe + the accepted first step only: no losing candidate is encoded.
+    expect(blobSizes).toEqual([900, 900]);
+  });
+
   it("reports too-large when even the smallest encoding overflows the budget", async () => {
     const { close } = stubCanvasPipeline(() => 8_000_000);
 
