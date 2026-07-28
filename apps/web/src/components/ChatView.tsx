@@ -4771,10 +4771,7 @@ function ChatViewContent(props: ChatViewProps) {
                     prepareWorktree: {
                       projectCwd: activeProject.workspaceRoot,
                       baseBranch: baseBranchForWorktree,
-                      branch: buildTemporaryWorktreeBranchName(
-                        randomHex,
-                        primaryServerSettings.worktreeBranchPrefix,
-                      ),
+                      branch: buildTemporaryWorktreeBranchName(randomHex),
                       ...(startFromOrigin ? { startFromOrigin: true } : {}),
                     },
                     runSetupScript: true,

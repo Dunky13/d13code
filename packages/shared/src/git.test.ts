@@ -8,9 +8,13 @@ import {
   isTemporaryWorktreeBranch,
   normalizeGitRemoteUrl,
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
+  renamespaceTemporaryWorktreeBranch,
   sanitizeWorktreeBranchPrefix,
   DEFAULT_WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
+
+/** A placeholder shape only ever produced by older mobile builds. */
+const LEGACY_UUID = "f4ae4e0e-f971-4d48-b4f2-9cf0aa54ab12";
 
 describe("normalizeGitRemoteUrl", () => {
   it("canonicalizes equivalent GitHub remotes across protocol variants", () => {
@@ -122,6 +126,49 @@ describe("isTemporaryWorktreeBranch", () => {
     expect(isTemporaryWorktreeBranch("deadbeef", "")).toBe(true);
     expect(isTemporaryWorktreeBranch("deadbeef")).toBe(false);
   });
+
+  it("honors the legacy UUID form only under the built-in prefix", () => {
+    // Older clients only ever generated UUID placeholders beneath `t3code`, so a
+    // real branch that happens to be UUID-shaped elsewhere is not a placeholder.
+    expect(
+      isTemporaryWorktreeBranch(`${DEFAULT_WORKTREE_BRANCH_PREFIX}/${LEGACY_UUID}`, "wip"),
+    ).toBe(true);
+    expect(isTemporaryWorktreeBranch(`wip/${LEGACY_UUID}`, "wip")).toBe(false);
+    expect(isTemporaryWorktreeBranch(LEGACY_UUID, "")).toBe(false);
+  });
+});
+
+describe("renamespaceTemporaryWorktreeBranch", () => {
+  it("moves a client placeholder under this server's prefix", () => {
+    expect(
+      renamespaceTemporaryWorktreeBranch(`${DEFAULT_WORKTREE_BRANCH_PREFIX}/deadbeef`, "wip"),
+    ).toBe("wip/deadbeef");
+    expect(
+      renamespaceTemporaryWorktreeBranch(`${DEFAULT_WORKTREE_BRANCH_PREFIX}/deadbeef`, ""),
+    ).toBe("deadbeef");
+  });
+
+  it("leaves a placeholder that already matches the prefix alone", () => {
+    expect(renamespaceTemporaryWorktreeBranch("wip/deadbeef", "wip")).toBe("wip/deadbeef");
+  });
+
+  it("never touches a deliberately named branch", () => {
+    expect(renamespaceTemporaryWorktreeBranch("feature/checkout-flow", "wip")).toBe(
+      "feature/checkout-flow",
+    );
+    expect(renamespaceTemporaryWorktreeBranch("main", "")).toBe("main");
+  });
+
+  it("collapses a legacy UUID placeholder to the canonical 8-hex form", () => {
+    // Otherwise the re-namespaced branch would no longer be recognized as a
+    // placeholder, and would never get its generated name.
+    const renamespaced = renamespaceTemporaryWorktreeBranch(
+      `${DEFAULT_WORKTREE_BRANCH_PREFIX}/${LEGACY_UUID}`,
+      "wip",
+    );
+    expect(renamespaced).toBe("wip/f4ae4e0e");
+    expect(isTemporaryWorktreeBranch(renamespaced, "wip")).toBe(true);
+  });
 });
 
 describe("sanitizeWorktreeBranchPrefix", () => {
@@ -163,6 +210,15 @@ describe("buildGeneratedWorktreeBranchName", () => {
     expect(
       buildGeneratedWorktreeBranchName(`${DEFAULT_WORKTREE_BRANCH_PREFIX}/fix-scroll-jump`, "wip"),
     ).toBe("wip/fix-scroll-jump");
+  });
+
+  it("does not double up a prefix inside a quoted suggestion", () => {
+    // Models routinely wrap the answer in quotes; the quotes must come off
+    // before the prefix check, or the prefix gets applied twice.
+    expect(buildGeneratedWorktreeBranchName(`'${DEFAULT_WORKTREE_BRANCH_PREFIX}/fix-scroll'`)).toBe(
+      `${DEFAULT_WORKTREE_BRANCH_PREFIX}/fix-scroll`,
+    );
+    expect(buildGeneratedWorktreeBranchName('"wip/fix-scroll"', "wip")).toBe("wip/fix-scroll");
   });
 
   it("produces a bare branch when the prefix is empty", () => {

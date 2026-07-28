@@ -19,13 +19,11 @@ import { makeTurnCommandMetadata, type TurnCommandMetadata } from "../../lib/com
 import { buildProjectThreadStartTurnInput } from "../../lib/projectThreadStartTurn";
 import { randomHex } from "../../lib/uuid";
 import { useAtomCommand } from "../../state/use-atom-command";
-import { useServerConfigs } from "../../state/entities";
 import { setPendingConnectionError } from "../../state/use-remote-environment-registry";
 import { validateProjectThreadCreation } from "./projectThreadCreationValidation";
 
 export function useCreateProjectThread() {
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
-  const serverConfigByEnvironmentId = useServerConfigs();
 
   return useCallback(
     async (input: {
@@ -76,11 +74,7 @@ export function useCreateProjectThread() {
           branch: input.branch,
           worktreePath: input.worktreePath,
           startFromOrigin: input.startFromOrigin ?? false,
-          worktreeBranchName: buildTemporaryWorktreeBranchName(
-            randomHex,
-            serverConfigByEnvironmentId.get(input.project.environmentId)?.settings
-              .worktreeBranchPrefix,
-          ),
+          worktreeBranchName: buildTemporaryWorktreeBranchName(randomHex),
         }),
       });
       if (AsyncResult.isFailure(result)) {
@@ -96,6 +90,6 @@ export function useCreateProjectThread() {
         scopeThreadRef(input.project.environmentId, threadId),
       );
     },
-    [serverConfigByEnvironmentId, startTurn],
+    [startTurn],
   );
 }

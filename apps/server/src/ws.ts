@@ -120,6 +120,7 @@ import * as PairingGrantStore from "./auth/PairingGrantStore.ts";
 import * as SessionStore from "./auth/SessionStore.ts";
 import { failEnvironmentAuthInvalid, failEnvironmentInternal } from "./auth/http.ts";
 import * as RelayClient from "@t3tools/shared/relayClient";
+import { renamespaceTemporaryWorktreeBranch } from "@t3tools/shared/git";
 const isOrchestrationDispatchCommandError = Schema.is(OrchestrationDispatchCommandError);
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -1009,6 +1010,17 @@ const makeWsRpcLayer = (
             }
 
             if (bootstrap?.prepareWorktree) {
+              // The client minted this placeholder against whatever prefix it
+              // knew about, which may not be this server's. Only the server
+              // knows its own, so re-namespace before the branch is created.
+              const requestedWorktreeBranch = bootstrap.prepareWorktree.branch;
+              const worktreeBranch =
+                requestedWorktreeBranch === undefined
+                  ? undefined
+                  : renamespaceTemporaryWorktreeBranch(
+                      requestedWorktreeBranch,
+                      (yield* serverSettings.getSettings).worktreeBranchPrefix,
+                    );
               let worktreeBaseRef = bootstrap.prepareWorktree.baseBranch;
               if (bootstrap.prepareWorktree.startFromOrigin) {
                 yield* gitWorkflow.fetchRemote({
@@ -1025,7 +1037,7 @@ const makeWsRpcLayer = (
               const worktree = yield* gitWorkflow.createWorktree({
                 cwd: bootstrap.prepareWorktree.projectCwd,
                 refName: worktreeBaseRef,
-                newRefName: bootstrap.prepareWorktree.branch,
+                newRefName: worktreeBranch,
                 baseRefName: bootstrap.prepareWorktree.baseBranch,
                 path: null,
               });

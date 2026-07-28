@@ -13,12 +13,14 @@ import { detectSourceControlProviderFromRemoteUrl } from "./sourceControl.ts";
 
 export { DEFAULT_WORKTREE_BRANCH_PREFIX };
 
-// Canonical token is 8 hex chars. Older mobile builds generated a full UUID via
-// Crypto.randomUUID() (always RFC 4122 v4), so the matcher also accepts exactly
-// that shape — version nibble `4`, variant nibble `[89ab]` — to keep those threads
-// eligible for branch regeneration without loosening beyond what was ever generated.
-const TEMPORARY_WORKTREE_TOKEN_PATTERN =
-  /^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/;
+// Canonical token is 8 hex chars.
+const TEMPORARY_WORKTREE_TOKEN_PATTERN = /^[0-9a-f]{8}$/;
+// Older mobile builds generated a full UUID via Crypto.randomUUID() (always RFC
+// 4122 v4), so that exact shape — version nibble `4`, variant nibble `[89ab]` —
+// stays eligible for branch regeneration, without loosening beyond what was ever
+// generated. Only honored under the built-in prefix; see below.
+const LEGACY_UUID_WORKTREE_TOKEN_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 /**
  * Sanitize an arbitrary string into a valid, lowercase git refName fragment.
@@ -140,28 +142,74 @@ export function buildTemporaryWorktreeBranchName(
 }
 
 /**
+ * The placeholder token of an auto-generated worktree branch, or `null` when
+ * the branch isn't one. Recognizes the configured prefix *and* the built-in
+ * `t3code` one, so worktrees created before the prefix changed keep working.
+ *
+ * The legacy UUID form is only ever accepted under the built-in prefix, because
+ * that is the only place older clients ever generated it — accepting it under
+ * an arbitrary prefix would mistake a real `wip/<uuid>` branch for a placeholder.
+ */
+function temporaryWorktreeBranchToken(refName: string, rawPrefix: string): string | null {
+  const normalized = refName.trim().toLowerCase();
+  const configuredPrefix = sanitizeWorktreeBranchPrefix(rawPrefix);
+
+  for (const prefix of new Set([configuredPrefix, DEFAULT_WORKTREE_BRANCH_PREFIX])) {
+    const token = prefix.length === 0 ? normalized : stripWorktreeBranchPrefix(normalized, prefix);
+    if (token === null) {
+      continue;
+    }
+    if (TEMPORARY_WORKTREE_TOKEN_PATTERN.test(token)) {
+      return token;
+    }
+    if (
+      prefix === DEFAULT_WORKTREE_BRANCH_PREFIX &&
+      LEGACY_UUID_WORKTREE_TOKEN_PATTERN.test(token)
+    ) {
+      return token;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Whether a branch is still an auto-generated worktree placeholder, and so is
  * safe to rename once a real branch name has been generated.
  *
- * Matches the configured prefix *and* the built-in `t3code` one, so worktrees
- * created before the prefix was changed keep working. When the configured
- * prefix is empty, a bare `<8 hex>` branch counts as temporary — that is the
- * shape this app generates in that mode, so it has to.
+ * When the configured prefix is empty, a bare `<8 hex>` branch counts as
+ * temporary — that is the shape this app generates in that mode, so it has to.
  */
 export function isTemporaryWorktreeBranch(
   refName: string,
   rawPrefix: string = DEFAULT_WORKTREE_BRANCH_PREFIX,
 ): boolean {
-  const normalized = refName.trim().toLowerCase();
-  const prefixes = new Set([
-    DEFAULT_WORKTREE_BRANCH_PREFIX,
-    sanitizeWorktreeBranchPrefix(rawPrefix),
-  ]);
+  return temporaryWorktreeBranchToken(refName, rawPrefix) !== null;
+}
 
-  return [...prefixes].some((prefix) => {
-    const token = prefix.length === 0 ? normalized : stripWorktreeBranchPrefix(normalized, prefix);
-    return token !== null && TEMPORARY_WORKTREE_TOKEN_PATTERN.test(token);
-  });
+/**
+ * Move a client-supplied placeholder branch under this server's configured
+ * prefix, leaving any deliberately-named branch untouched.
+ *
+ * Clients mint the placeholder before the server sees it, and a client can be
+ * pointed at an environment whose prefix differs from the one it knows about
+ * (or hold a snapshot taken before the setting changed). The server is the only
+ * party that knows its own prefix for certain, so it re-namespaces on the way in.
+ */
+export function renamespaceTemporaryWorktreeBranch(
+  refName: string,
+  rawPrefix: string = DEFAULT_WORKTREE_BRANCH_PREFIX,
+): string {
+  const token = temporaryWorktreeBranchToken(refName, rawPrefix);
+  if (token === null) {
+    return refName;
+  }
+
+  // Collapse a legacy UUID token to the canonical 8 hex chars, matching what
+  // `buildTemporaryWorktreeBranchName` emits, so the result stays recognizable
+  // as a placeholder under the new prefix.
+  const canonicalToken = token.replace(/-/g, "").slice(0, 8);
+  return applyWorktreeBranchPrefix(sanitizeWorktreeBranchPrefix(rawPrefix), canonicalToken);
 }
 
 /**
@@ -176,6 +224,9 @@ export function buildGeneratedWorktreeBranchName(
   const normalized = raw
     .trim()
     .toLowerCase()
+    // Quotes come off before prefix detection: a suggestion like `"t3code/fix"`
+    // would otherwise fail the prefix check and end up double-namespaced.
+    .replace(/['"`]/g, "")
     .replace(/^refs\/heads\//, "");
   const sanitizedPrefix = sanitizeWorktreeBranchPrefix(rawPrefix);
   const withoutPrefix =
