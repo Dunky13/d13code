@@ -23,7 +23,7 @@ import { OpenInPicker } from "~/components/chat/OpenInPicker";
 import { useClientSettings } from "~/hooks/useSettings";
 import { useTheme } from "~/hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "~/hooks/useLocalStorage";
-import { resolveDiffThemeName } from "~/lib/diffRendering";
+import { GUTTER_TOUCH_SCROLL_UNSAFE_CSS, resolveDiffThemeName } from "~/lib/diffRendering";
 import { cn } from "~/lib/utils";
 import { isPreviewSupportedInRuntime } from "~/previewStateStore";
 import { resolvePathLinkTarget } from "~/terminal-links";
@@ -112,6 +112,7 @@ const FILE_LINK_REVEAL_UNSAFE_CSS = `
     ) !important;
     color: var(--diffs-selection-number-fg) !important;
   }
+${GUTTER_TOUCH_SCROLL_UNSAFE_CSS}
 `;
 type FilePostRender = NonNullable<FileOptions<unknown>["onPostRender"]>;
 

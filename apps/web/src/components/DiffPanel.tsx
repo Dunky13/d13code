@@ -32,6 +32,7 @@ import {
   getDiffCollapseIconClassName,
   getDiffLineStat,
   getRenderablePatch,
+  GUTTER_TOUCH_SCROLL_UNSAFE_CSS,
   resolveDiffThemeName,
   resolveFileDiffPath,
 } from "../lib/diffRendering";
@@ -179,6 +180,7 @@ const DIFF_PANEL_UNSAFE_CSS = `
   color: color-mix(in srgb, var(--foreground) 84%, var(--primary)) !important;
   text-decoration-color: currentColor;
 }
+${GUTTER_TOUCH_SCROLL_UNSAFE_CSS}
 `;
 
 interface DiffPanelProps {

@@ -12,6 +12,18 @@ export function resolveDiffThemeName(theme: "light" | "dark"): DiffThemeName {
   return theme === "dark" ? DIFF_THEME_NAMES.dark : DIFF_THEME_NAMES.light;
 }
 
+/**
+ * @pierre/diffs sets `touch-action: none` on the line-number column whenever line
+ * selection is enabled, so a touch drag starting on the gutter scrolls nothing.
+ * `pan-x pan-y` gives the scroll back; drag-to-range-select on touch is traded away
+ * (tap-to-select and the gutter utility button still work).
+ */
+export const GUTTER_TOUCH_SCROLL_UNSAFE_CSS = `
+[data-interactive-line-numbers] [data-column-number] {
+  touch-action: pan-x pan-y !important;
+}
+`;
+
 const FNV_OFFSET_BASIS_32 = 0x811c9dc5;
 const FNV_PRIME_32 = 0x01000193;
 const SECONDARY_HASH_SEED = 0x9e3779b9;
