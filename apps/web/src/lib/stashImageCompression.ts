@@ -65,6 +65,15 @@ async function blobToDataUrl(blob: File | Blob, mimeTypeOverride?: string): Prom
   return `data:${mimeType};base64,${bytesToBase64(new Uint8Array(buffer))}`;
 }
 
+/**
+ * Exact data URL length for a payload of `byteLength` bytes: base64 emits
+ * 4 padded characters per 3 bytes. Lets a candidate be measured against the
+ * budget without base64-encoding it first.
+ */
+function dataUrlLengthForBytes(byteLength: number, mimeType: string): number {
+  return `data:${mimeType};base64,`.length + Math.ceil(byteLength / 3) * 4;
+}
+
 /** Approximate decoded byte count for a base64 data URL. */
 function dataUrlByteLength(dataUrl: string): number {
   const commaIndex = dataUrl.indexOf(",");
@@ -102,25 +111,42 @@ function createCanvas(width: number, height: number): Canvas2D | null {
 }
 
 /**
+ * An encoding that has been measured but not necessarily materialized. Most
+ * candidates lose to a later quality step or blow the budget, and base64ing a
+ * multi-megabyte blob only to discard it is the expensive part of this module —
+ * so `length` comes from the blob size and the string is built on demand.
+ */
+interface EncodedCandidate {
+  mimeType: string;
+  /** Length of the data URL this candidate would produce. */
+  length: number;
+  toDataUrl: () => Promise<string>;
+}
+
+/**
  * WebP is preferred: at matched visual quality it lands roughly 25-35%
  * smaller than JPEG, so the same budget buys more resolution and detail —
  * and it keeps alpha, so screenshots with transparency survive intact.
  * Browsers that can't encode it silently fall back to JPEG.
  */
-async function encodeToDataUrl(
+async function encodeCandidate(
   canvas: OffscreenCanvas | HTMLCanvasElement,
   quality: number,
   mimeType: string,
-): Promise<{ dataUrl: string; mimeType: string } | null> {
+): Promise<EncodedCandidate | null> {
   if (typeof HTMLCanvasElement !== "undefined" && canvas instanceof HTMLCanvasElement) {
     const dataUrl = canvas.toDataURL(mimeType, quality);
     // toDataURL silently returns a PNG when the requested type is unsupported.
     if (!dataUrl.startsWith(`data:${mimeType}`)) return null;
-    return { dataUrl, mimeType };
+    return { mimeType, length: dataUrl.length, toDataUrl: async () => dataUrl };
   }
   const blob = await (canvas as OffscreenCanvas).convertToBlob({ type: mimeType, quality });
   if (blob.type && blob.type !== mimeType) return null;
-  return { dataUrl: await blobToDataUrl(blob, mimeType), mimeType };
+  return {
+    mimeType,
+    length: dataUrlLengthForBytes(blob.size, mimeType),
+    toDataUrl: () => blobToDataUrl(blob, mimeType),
+  };
 }
 
 /**
@@ -133,7 +159,7 @@ async function encodeWithinBudget(
   bitmap: ImageBitmap,
   maxDimension: number,
   budgetChars: number,
-): Promise<{ dataUrl: string; mimeType: string } | null> {
+): Promise<EncodedCandidate | null> {
   const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));
@@ -142,7 +168,7 @@ async function encodeWithinBudget(
 
   // Probe WebP once; JPEG (no alpha) needs a white matte, so the fill has to
   // happen before drawing and depends on which codec we end up using.
-  const probe = await encodeToDataUrl(target.canvas, QUALITY_STEPS[0], "image/webp");
+  const probe = await encodeCandidate(target.canvas, QUALITY_STEPS[0], "image/webp");
   const mimeType = probe ? "image/webp" : "image/jpeg";
 
   if (mimeType === "image/jpeg") {
@@ -151,14 +177,14 @@ async function encodeWithinBudget(
   }
   target.context.drawImage(bitmap, 0, 0, width, height);
 
-  let smallest: { dataUrl: string; mimeType: string } | null = null;
+  let smallest: EncodedCandidate | null = null;
   for (const quality of QUALITY_STEPS) {
-    const encoded = await encodeToDataUrl(target.canvas, quality, mimeType);
+    const encoded = await encodeCandidate(target.canvas, quality, mimeType);
     if (!encoded) break;
-    if (smallest === null || encoded.dataUrl.length < smallest.dataUrl.length) {
+    if (smallest === null || encoded.length < smallest.length) {
       smallest = encoded;
     }
-    if (encoded.dataUrl.length <= budgetChars) {
+    if (encoded.length <= budgetChars) {
       return encoded;
     }
   }
@@ -217,9 +243,24 @@ export async function compressImageForStash(
     let encodeFailed = false;
     for (const dimensionScale of [1, ...FALLBACK_SCALE_STEPS]) {
       const targetDimension = Math.max(1, Math.round(baseDimension * dimensionScale));
-      let encoded: { dataUrl: string; mimeType: string } | null;
       try {
-        encoded = await encodeWithinBudget(bitmap, targetDimension, budgetChars);
+        const encoded = await encodeWithinBudget(bitmap, targetDimension, budgetChars);
+        encodeFailed = false;
+        if (encoded && encoded.length <= budgetChars) {
+          // Only the accepted candidate pays for base64. This has to stay
+          // inside the try: reading the blob back can fail too, and it is the
+          // same class of failure as the encode itself.
+          const dataUrl = await encoded.toDataUrl();
+          return {
+            ok: true,
+            image: {
+              dataUrl,
+              mimeType: encoded.mimeType,
+              sizeBytes: dataUrlByteLength(dataUrl),
+              recompressed: true,
+            },
+          };
+        }
       } catch {
         // Canvas allocation, drawing, or the codec itself can throw — often
         // precisely *because* the target is too big (OOM on a large bitmap).
@@ -229,18 +270,6 @@ export async function compressImageForStash(
         // a throw would strand it as permanently "still saving".
         encodeFailed = true;
         continue;
-      }
-      encodeFailed = false;
-      if (encoded && encoded.dataUrl.length <= budgetChars) {
-        return {
-          ok: true,
-          image: {
-            dataUrl: encoded.dataUrl,
-            mimeType: encoded.mimeType,
-            sizeBytes: dataUrlByteLength(encoded.dataUrl),
-            recompressed: true,
-          },
-        };
       }
     }
     return { ok: false, reason: encodeFailed ? "unreadable" : "too-large" };
