@@ -9,7 +9,11 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { ATTACHMENT_UPLOADS_DIRECTORY } from "./attachmentStore.ts";
-import { inferUploadExtension, persistUploadedAttachment } from "./attachmentUpload.ts";
+import {
+  ATTACHMENT_UPLOAD_TTL_MS,
+  inferUploadExtension,
+  persistUploadedAttachment,
+} from "./attachmentUpload.ts";
 
 const createdDirs: string[] = [];
 
@@ -24,6 +28,9 @@ afterAll(() => {
     NodeFS.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Fixed clock for TTL assertions; file mtimes are set explicitly against it.
+const FIXED_NOW_MS = 1_800_000_000_000;
 
 function dataUrl(mimeType: string, contents: string): string {
   return `data:${mimeType};base64,${Buffer.from(contents, "utf8").toString("base64")}`;
@@ -171,6 +178,55 @@ describe("persistUploadedAttachment", () => {
       expect(
         NodeFS.readdirSync(NodePath.join(attachmentsDir, ATTACHMENT_UPLOADS_DIRECTORY)),
       ).toHaveLength(1);
+    }),
+  );
+
+  it.effect("retires uploads past the TTL and stops counting them", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const stale = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+        name: "stale.log",
+        dataUrl: dataUrl("text/plain", "1234"),
+      });
+
+      // Age the first upload past the TTL, then upload again under a budget that
+      // only fits one file: the stale one has to be retired for this to succeed.
+      const staleSeconds = (FIXED_NOW_MS - ATTACHMENT_UPLOAD_TTL_MS - 60_000) / 1000;
+      NodeFS.utimesSync(stale.path, staleSeconds, staleSeconds);
+      const fresh = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+        name: "fresh.log",
+        dataUrl: dataUrl("text/plain", "5678"),
+        totalBudgetBytes: 6,
+        now: FIXED_NOW_MS,
+      });
+
+      expect(NodeFS.existsSync(stale.path)).toBe(false);
+      expect(NodeFS.existsSync(fresh.path)).toBe(true);
+    }),
+  );
+
+  it.effect("refuses to report free space when the uploads directory is unreadable", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const uploadsDir = NodePath.join(attachmentsDir, ATTACHMENT_UPLOADS_DIRECTORY);
+      NodeFS.mkdirSync(uploadsDir);
+      NodeFS.chmodSync(uploadsDir, 0o000);
+
+      const failure = yield* Effect.flip(
+        persistUploadedAttachment({
+          attachmentsDir,
+          ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+          name: "server.log",
+          dataUrl: dataUrl("text/plain", "boom"),
+        }),
+      );
+
+      NodeFS.chmodSync(uploadsDir, 0o755);
+      expect(failure._tag).toBe("AttachmentUploadError");
     }),
   );
 

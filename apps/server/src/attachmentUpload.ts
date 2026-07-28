@@ -4,6 +4,7 @@ import * as NodePath from "node:path";
 
 import Mime from "@effect/platform-node/Mime";
 import { ATTACHMENT_UPLOAD_MAX_BYTES, AttachmentUploadError } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 
 import { resolveAttachmentRelativePath } from "./attachmentPaths.ts";
@@ -30,27 +31,79 @@ function withUploadLock<A>(run: () => Promise<A>): Promise<A> {
   return next;
 }
 
-// Recomputed per upload rather than cached: thread deletion removes files behind
-// our back, so a cached total would drift. Cost is one stat per stored upload,
-// which stays trivial while the directory holds at most a few thousand files.
-async function uploadsDirectoryBytes(uploadsDir: string): Promise<number> {
-  let entries;
+/**
+ * Uploads whose draft was abandoned, or whose link the author deleted before
+ * sending, are unreachable: nothing records them, so only age can retire them.
+ * Thread deletion still reclaims referenced uploads immediately.
+ */
+export const ATTACHMENT_UPLOAD_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Guards inode exhaustion, which a byte budget alone does not bound. */
+export const ATTACHMENT_UPLOADS_MAX_FILES = 2000;
+
+type UploadOutcome = "written" | "over-budget" | "too-many-files";
+
+interface UploadsDirectoryUsage {
+  readonly totalBytes: number;
+  readonly fileCount: number;
+}
+
+function isMissingFileError(cause: unknown): boolean {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "code" in cause &&
+    (cause.code === "ENOENT" || cause.code === "ENOTDIR")
+  );
+}
+
+/**
+ * Recomputed per upload rather than cached: thread deletion removes files behind
+ * our back, so a cached total would drift. Expired uploads are retired during
+ * the same sweep, which keeps the directory — and therefore this scan — bounded.
+ * Throws rather than reporting free space when the directory cannot be read; a
+ * quota that fails open is not a quota.
+ */
+async function uploadsDirectoryUsage(
+  uploadsDir: string,
+  now: number,
+): Promise<UploadsDirectoryUsage> {
+  let entries: Array<string>;
   try {
-    entries = await NodeFSP.readdir(uploadsDir, { withFileTypes: true });
-  } catch {
-    return 0;
-  }
-  let total = 0;
-  for (const entry of entries) {
-    if (!entry.isFile()) continue;
-    try {
-      const stats = await NodeFSP.stat(NodePath.join(uploadsDir, entry.name));
-      total += stats.size;
-    } catch {
-      // A file that vanished mid-sweep contributes nothing.
+    entries = await NodeFSP.readdir(uploadsDir);
+  } catch (cause) {
+    if (isMissingFileError(cause)) {
+      return { totalBytes: 0, fileCount: 0 };
     }
+    throw cause;
   }
-  return total;
+
+  let totalBytes = 0;
+  let fileCount = 0;
+  for (const entry of entries) {
+    const entryPath = NodePath.join(uploadsDir, entry);
+    let stats;
+    try {
+      stats = await NodeFSP.stat(entryPath);
+    } catch (cause) {
+      // A file that vanished mid-sweep contributes nothing; anything else means
+      // the sweep cannot account for the directory and must not report free space.
+      if (isMissingFileError(cause)) continue;
+      throw cause;
+    }
+    if (!stats.isFile()) continue;
+    if (now - stats.mtimeMs > ATTACHMENT_UPLOAD_TTL_MS) {
+      try {
+        await NodeFSP.rm(entryPath, { force: true });
+        continue;
+      } catch {
+        // Keep counting it if it could not be retired.
+      }
+    }
+    totalBytes += stats.size;
+    fileCount += 1;
+  }
+  return { totalBytes, fileCount };
 }
 
 /**
@@ -62,9 +115,9 @@ export function inferUploadExtension(input: {
   readonly name: string;
   readonly mimeType: string;
 }): string {
-  const fromName = EXTENSION_PATTERN.exec(input.name.trim());
+  const fromName = EXTENSION_PATTERN.exec(input.name.trim())?.[1];
   if (fromName) {
-    return `.${fromName[1]!.toLowerCase()}`;
+    return `.${fromName.toLowerCase()}`;
   }
   // Mime.getExtension returns a bare extension ("json"), not a dotted one.
   const fromMime = Mime.getExtension(input.mimeType);
@@ -81,9 +134,12 @@ export const persistUploadedAttachment = Effect.fn("persistUploadedAttachment")(
   readonly dataUrl: string;
   /** Overridable so a test can fill the budget without writing 512MB. */
   readonly totalBudgetBytes?: number;
+  /** Overridable so a test can age uploads past the TTL without waiting. */
+  readonly now?: number;
 }) {
   const totalBudgetBytes = input.totalBudgetBytes ?? ATTACHMENT_UPLOADS_TOTAL_MAX_BYTES;
   const fail = (reason: string) => new AttachmentUploadError({ name: input.name, reason });
+  let failureCause: unknown = null;
 
   const parsed = parseBase64DataUrl(input.dataUrl);
   if (!parsed) {
@@ -118,12 +174,16 @@ export const persistUploadedAttachment = Effect.fn("persistUploadedAttachment")(
   // uploads directory carries a total budget instead. It bounds what a client can
   // park under owners that no thread lifecycle will ever clean up.
   const uploadsDir = NodePath.dirname(filePath);
-  const outcome = yield* Effect.tryPromise({
+  const now = input.now ?? (yield* Clock.currentTimeMillis);
+  const outcome: UploadOutcome = yield* Effect.tryPromise({
     try: () =>
-      withUploadLock(async () => {
-        const usedBytes = await uploadsDirectoryBytes(uploadsDir);
-        if (usedBytes + bytes.byteLength > totalBudgetBytes) {
-          return "over-budget" as const;
+      withUploadLock(async (): Promise<UploadOutcome> => {
+        const usage = await uploadsDirectoryUsage(uploadsDir, now);
+        if (usage.totalBytes + bytes.byteLength > totalBudgetBytes) {
+          return "over-budget";
+        }
+        if (usage.fileCount >= ATTACHMENT_UPLOADS_MAX_FILES) {
+          return "too-many-files";
         }
         await NodeFSP.mkdir(uploadsDir, { recursive: true });
         try {
@@ -133,14 +193,29 @@ export const persistUploadedAttachment = Effect.fn("persistUploadedAttachment")(
           await NodeFSP.rm(filePath, { force: true });
           throw cause;
         }
-        return "written" as const;
+        return "written";
       }),
-    catch: () => fail("the file could not be written to disk."),
-  });
+    catch: (cause) => {
+      failureCause = cause;
+      return fail("the file could not be written to disk.");
+    },
+  }).pipe(
+    Effect.tapError(() =>
+      Effect.logWarning("failed to store an uploaded attachment", {
+        name: input.name,
+        cause: failureCause,
+      }),
+    ),
+  );
 
   if (outcome === "over-budget") {
     return yield* fail(
       `the ${Math.floor(totalBudgetBytes / (1024 * 1024))}MB upload storage budget is full; delete some threads first.`,
+    );
+  }
+  if (outcome === "too-many-files") {
+    return yield* fail(
+      `the upload storage already holds ${ATTACHMENT_UPLOADS_MAX_FILES} files; delete some threads first.`,
     );
   }
 

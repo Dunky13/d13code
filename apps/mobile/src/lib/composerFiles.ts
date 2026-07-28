@@ -48,8 +48,9 @@ export function resolveComposerFileMimeType(input: {
     return mimeType;
   }
   const extension = /\.([a-z0-9]+)$/i.exec(input.name.trim())?.[1]?.toLowerCase();
-  if (extension && Object.hasOwn(IMAGE_EXTENSION_MIME_TYPES, extension)) {
-    return IMAGE_EXTENSION_MIME_TYPES[extension]!;
+  const imageMimeType = extension ? IMAGE_EXTENSION_MIME_TYPES[extension] : undefined;
+  if (imageMimeType) {
+    return imageMimeType;
   }
   return mimeType.length > 0 ? mimeType : "application/octet-stream";
 }

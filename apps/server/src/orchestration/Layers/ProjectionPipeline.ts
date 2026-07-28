@@ -385,9 +385,10 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
   );
 
   const uploadsDir = path.join(attachmentsRootDir, ATTACHMENT_UPLOADS_DIRECTORY);
+  const noUploadEntries: ReadonlyArray<string> = [];
   const readUploadEntries = fileSystem
     .readDirectory(uploadsDir, { recursive: false })
-    .pipe(Effect.orElseSucceed(() => [] as Array<string>));
+    .pipe(Effect.orElseSucceed(() => noUploadEntries));
 
   const removeDeletedThreadUploadEntry = Effect.fn("removeDeletedThreadUploadEntry")(function* (
     threadSegment: string,
