@@ -137,6 +137,39 @@ describe("compressImageForStash", () => {
     expect(blobSizes).toEqual([900, 900]);
   });
 
+  it("reports a failure rather than throwing when the accepted blob cannot be read", async () => {
+    // The caller finalizes its pending count on the returned result, so a
+    // rejection here would strand the entry as permanently "still saving".
+    const close = vi.fn();
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async () => ({ width: 4000, height: 3000, close })),
+    );
+    vi.stubGlobal(
+      "OffscreenCanvas",
+      class {
+        constructor(
+          public width: number,
+          public height: number,
+        ) {}
+        getContext() {
+          return { fillStyle: "", fillRect: vi.fn(), drawImage: vi.fn() };
+        }
+        async convertToBlob({ type }: { type: string; quality: number }) {
+          const blob = new Blob([new Uint8Array(1_000)], { type });
+          blob.arrayBuffer = () => Promise.reject(new Error("blob went away"));
+          return blob;
+        }
+      },
+    );
+
+    expect(await compressImageForStash(makeFile(4_000_000))).toEqual({
+      ok: false,
+      reason: "unreadable",
+    });
+    expect(close).toHaveBeenCalled();
+  });
+
   it("reports too-large when even the smallest encoding overflows the budget", async () => {
     const { close } = stubCanvasPipeline(() => 8_000_000);
 

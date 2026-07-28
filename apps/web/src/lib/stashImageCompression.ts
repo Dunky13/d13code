@@ -243,9 +243,24 @@ export async function compressImageForStash(
     let encodeFailed = false;
     for (const dimensionScale of [1, ...FALLBACK_SCALE_STEPS]) {
       const targetDimension = Math.max(1, Math.round(baseDimension * dimensionScale));
-      let encoded: EncodedCandidate | null;
       try {
-        encoded = await encodeWithinBudget(bitmap, targetDimension, budgetChars);
+        const encoded = await encodeWithinBudget(bitmap, targetDimension, budgetChars);
+        encodeFailed = false;
+        if (encoded && encoded.length <= budgetChars) {
+          // Only the accepted candidate pays for base64. This has to stay
+          // inside the try: reading the blob back can fail too, and it is the
+          // same class of failure as the encode itself.
+          const dataUrl = await encoded.toDataUrl();
+          return {
+            ok: true,
+            image: {
+              dataUrl,
+              mimeType: encoded.mimeType,
+              sizeBytes: dataUrlByteLength(dataUrl),
+              recompressed: true,
+            },
+          };
+        }
       } catch {
         // Canvas allocation, drawing, or the codec itself can throw — often
         // precisely *because* the target is too big (OOM on a large bitmap).
@@ -255,20 +270,6 @@ export async function compressImageForStash(
         // a throw would strand it as permanently "still saving".
         encodeFailed = true;
         continue;
-      }
-      encodeFailed = false;
-      if (encoded && encoded.length <= budgetChars) {
-        // Only the accepted candidate pays for base64.
-        const dataUrl = await encoded.toDataUrl();
-        return {
-          ok: true,
-          image: {
-            dataUrl,
-            mimeType: encoded.mimeType,
-            sizeBytes: dataUrlByteLength(dataUrl),
-            recompressed: true,
-          },
-        };
       }
     }
     return { ok: false, reason: encodeFailed ? "unreadable" : "too-large" };
