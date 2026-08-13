@@ -965,9 +965,19 @@ it.layer(
       yield* fileSystem.writeFileString(removePath, "remove");
       const otherThreadPath = path.join(attachmentsDir, `${otherThreadAttachmentId}.png`);
       yield* fileSystem.writeFileString(otherThreadPath, "other");
+      // Uploaded documents are referenced from message text, not from message
+      // rows, so a revert must never take them with it.
+      const uploadPath = path.join(
+        attachmentsDir,
+        "uploads",
+        `${removeAttachmentId.replace(/2$/, "9")}.log`,
+      );
+      yield* fileSystem.makeDirectory(path.dirname(uploadPath), { recursive: true });
+      yield* fileSystem.writeFileString(uploadPath, "log");
       assert.isTrue(yield* exists(keepPath));
       assert.isTrue(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
+      assert.isTrue(yield* exists(uploadPath));
 
       yield* appendAndProject({
         type: "thread.reverted",
@@ -988,6 +998,7 @@ it.layer(
       assert.isTrue(yield* exists(keepPath));
       assert.isFalse(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
+      assert.isTrue(yield* exists(uploadPath));
     }),
   );
 });
@@ -1096,11 +1107,22 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-atta
           attachmentsDir,
           `${otherThreadAttachmentId}.png`,
         );
+        const threadUploadPath = path.join(attachmentsDir, "uploads", `${attachmentId}.log`);
+        const otherThreadUploadPath = path.join(
+          attachmentsDir,
+          "uploads",
+          `${otherThreadAttachmentId}.log`,
+        );
         yield* fileSystem.makeDirectory(attachmentsDir, { recursive: true });
+        yield* fileSystem.makeDirectory(path.join(attachmentsDir, "uploads"), { recursive: true });
         yield* fileSystem.writeFileString(threadAttachmentPath, "delete");
         yield* fileSystem.writeFileString(otherThreadAttachmentPath, "other-thread");
+        yield* fileSystem.writeFileString(threadUploadPath, "delete-upload");
+        yield* fileSystem.writeFileString(otherThreadUploadPath, "other-thread-upload");
         assert.isTrue(yield* exists(threadAttachmentPath));
         assert.isTrue(yield* exists(otherThreadAttachmentPath));
+        assert.isTrue(yield* exists(threadUploadPath));
+        assert.isTrue(yield* exists(otherThreadUploadPath));
 
         yield* appendAndProject({
           type: "thread.deleted",
@@ -1120,6 +1142,9 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-atta
 
         assert.isFalse(yield* exists(threadAttachmentPath));
         assert.isTrue(yield* exists(otherThreadAttachmentPath));
+        // Deleting the thread owns its uploads too, and only its own.
+        assert.isFalse(yield* exists(threadUploadPath));
+        assert.isTrue(yield* exists(otherThreadUploadPath));
       }),
     );
   },

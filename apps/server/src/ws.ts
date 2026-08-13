@@ -64,6 +64,7 @@ import { clamp } from "effect/Number";
 import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
+import { persistUploadedAttachment } from "./attachmentUpload.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
@@ -332,6 +333,7 @@ const RPC_REQUIRED_SCOPE = new Map<string, AuthEnvironmentScope>([
   [WS_METHODS.shellOpenInEditor, AuthOrchestrationOperateScope],
   [WS_METHODS.filesystemBrowse, AuthOrchestrationReadScope],
   [WS_METHODS.assetsCreateUrl, AuthOrchestrationReadScope],
+  [WS_METHODS.attachmentsUpload, AuthOrchestrationOperateScope],
   [WS_METHODS.subscribeVcsStatus, AuthOrchestrationReadScope],
   [WS_METHODS.vcsRefreshStatus, AuthOrchestrationReadScope],
   [WS_METHODS.vcsPull, AuthOrchestrationOperateScope],
@@ -1759,6 +1761,17 @@ const makeWsRpcLayer = (
                 resource: input.resource,
                 workspaceRoot: thread.value.worktreePath ?? project.value.workspaceRoot,
               });
+            }),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.attachmentsUpload]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.attachmentsUpload,
+            persistUploadedAttachment({
+              attachmentsDir: config.attachmentsDir,
+              ownerId: input.ownerId,
+              name: input.name,
+              dataUrl: input.dataUrl,
             }),
             { "rpc.aggregate": "workspace" },
           ),

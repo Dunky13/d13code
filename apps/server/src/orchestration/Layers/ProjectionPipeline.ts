@@ -49,6 +49,7 @@ import {
   type OrchestrationProjectionPipelineShape,
 } from "../Services/ProjectionPipeline.ts";
 import {
+  ATTACHMENT_UPLOADS_DIRECTORY,
   attachmentRelativePath,
   parseAttachmentIdFromRelativePath,
   parseThreadSegmentFromAttachmentId,
@@ -383,6 +384,31 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
     },
   );
 
+  const uploadsDir = path.join(attachmentsRootDir, ATTACHMENT_UPLOADS_DIRECTORY);
+  const noUploadEntries: ReadonlyArray<string> = [];
+  const readUploadEntries = fileSystem
+    .readDirectory(uploadsDir, { recursive: false })
+    .pipe(Effect.orElseSucceed(() => noUploadEntries));
+
+  const removeDeletedThreadUploadEntry = Effect.fn("removeDeletedThreadUploadEntry")(function* (
+    threadSegment: string,
+    entry: string,
+  ) {
+    const normalizedEntry = entry.replace(/^[/\\]+/, "").replace(/\\/g, "/");
+    if (normalizedEntry.length === 0 || normalizedEntry.includes("/")) {
+      return;
+    }
+    const attachmentId = parseAttachmentIdFromRelativePath(normalizedEntry);
+    if (!attachmentId) {
+      return;
+    }
+    const attachmentThreadSegment = parseThreadSegmentFromAttachmentId(attachmentId);
+    if (!attachmentThreadSegment || attachmentThreadSegment !== threadSegment) {
+      return;
+    }
+    yield* fileSystem.remove(path.join(uploadsDir, normalizedEntry), { force: true });
+  });
+
   const deleteThreadAttachments = Effect.fn("deleteThreadAttachments")(function* (
     threadId: string,
   ) {
@@ -401,6 +427,13 @@ const runAttachmentSideEffects = Effect.fn("runAttachmentSideEffects")(function*
       {
         concurrency: 1,
       },
+    );
+    // Uploaded documents live one level down; deleting the thread still owns them.
+    const uploadEntries = yield* readUploadEntries;
+    yield* Effect.forEach(
+      uploadEntries,
+      (entry) => removeDeletedThreadUploadEntry(threadSegment, entry),
+      { concurrency: 1 },
     );
   });
 

@@ -1,0 +1,249 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+
+import { AttachmentUploadInput } from "@t3tools/contracts";
+import { afterAll, describe, expect, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
+import { ATTACHMENT_UPLOADS_DIRECTORY } from "./attachmentStore.ts";
+import {
+  ATTACHMENT_UPLOAD_TTL_MS,
+  inferUploadExtension,
+  persistUploadedAttachment,
+} from "./attachmentUpload.ts";
+
+const createdDirs: string[] = [];
+
+function makeAttachmentsDir(): string {
+  const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-attachment-upload-"));
+  createdDirs.push(dir);
+  return dir;
+}
+
+afterAll(() => {
+  for (const dir of createdDirs) {
+    NodeFS.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Fixed clock for TTL assertions; file mtimes are set explicitly against it.
+const FIXED_NOW_MS = 1_800_000_000_000;
+
+function dataUrl(mimeType: string, contents: string): string {
+  return `data:${mimeType};base64,${Buffer.from(contents, "utf8").toString("base64")}`;
+}
+
+describe("AttachmentUploadInput", () => {
+  const decode = Schema.decodeUnknownSync(AttachmentUploadInput);
+  const payload = {
+    ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+    name: "server.log",
+    dataUrl: "data:text/plain;base64,Ym9vbQ==",
+  };
+
+  it("accepts thread and draft ids", () => {
+    expect(decode(payload).ownerId).toBe(payload.ownerId);
+  });
+
+  it("rejects an empty owner id", () => {
+    expect(() => decode({ ...payload, ownerId: "   " })).toThrow();
+  });
+});
+
+describe("inferUploadExtension", () => {
+  it("prefers the extension carried by the file name", () => {
+    expect(inferUploadExtension({ name: "server.log", mimeType: "text/plain" })).toBe(".log");
+    expect(inferUploadExtension({ name: "Trace.TXT", mimeType: "text/plain" })).toBe(".txt");
+  });
+
+  it("falls back to the mime type and then to .bin", () => {
+    expect(inferUploadExtension({ name: "dump", mimeType: "application/json" })).toBe(".json");
+    expect(inferUploadExtension({ name: "dump", mimeType: "application/x-unknown-type" })).toBe(
+      ".bin",
+    );
+  });
+
+  it("resolves an extensionless traversal-shaped name through the mime type", () => {
+    expect(inferUploadExtension({ name: "../../etc/passwd", mimeType: "text/plain" })).toBe(".txt");
+  });
+});
+
+describe("persistUploadedAttachment", () => {
+  it.effect("writes the file inside the attachments dir and returns its path", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const result = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId: "thr_01",
+        name: "server.log",
+        dataUrl: dataUrl("text/plain", "boom\n"),
+      });
+
+      expect(result.path.startsWith(`${NodePath.resolve(attachmentsDir)}${NodePath.sep}`)).toBe(
+        true,
+      );
+      expect(result.path.endsWith(".log")).toBe(true);
+      expect(NodeFS.readFileSync(result.path, "utf8")).toBe("boom\n");
+    }),
+  );
+
+  it.effect("keeps a traversal-shaped file name inside the attachments dir", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const result = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId: "thr_01",
+        name: "../../../../etc/passwd.log",
+        dataUrl: dataUrl("text/plain", "nope"),
+      });
+
+      expect(NodePath.dirname(result.path)).toBe(
+        NodePath.join(NodePath.resolve(attachmentsDir), ATTACHMENT_UPLOADS_DIRECTORY),
+      );
+    }),
+  );
+
+  it.effect("rejects payloads that are not base64 data URLs", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const failure = yield* Effect.flip(
+        persistUploadedAttachment({
+          attachmentsDir,
+          ownerId: "thr_01",
+          name: "server.log",
+          dataUrl: "https://example.com/server.log",
+        }),
+      );
+
+      expect(failure._tag).toBe("AttachmentUploadError");
+      expect(NodeFS.readdirSync(attachmentsDir)).toEqual([]);
+    }),
+  );
+
+  it.effect("stores uploads under the owner id in the uploads directory", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const ownerId = "0e70cccb-51e2-49af-a022-146fbaeede55";
+      const result = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId,
+        name: "server.log",
+        dataUrl: dataUrl("text/plain", "boom"),
+      });
+
+      expect(NodePath.basename(result.path).startsWith(ownerId)).toBe(true);
+      // Revert pruning only walks the attachments root, so an upload nested one
+      // level down cannot be deleted while its message still references it.
+      expect(NodePath.basename(NodePath.dirname(result.path))).toBe(ATTACHMENT_UPLOADS_DIRECTORY);
+      expect(NodeFS.readdirSync(attachmentsDir)).toEqual([ATTACHMENT_UPLOADS_DIRECTORY]);
+    }),
+  );
+
+  it.effect("keeps an image-shaped document name out of the prunable root", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const result = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+        name: "report.png",
+        dataUrl: dataUrl("text/plain", "not really a png"),
+      });
+
+      expect(NodePath.basename(NodePath.dirname(result.path))).toBe(ATTACHMENT_UPLOADS_DIRECTORY);
+    }),
+  );
+
+  it.effect("keeps concurrent uploads inside the storage budget", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      // Two 4-byte uploads against a budget that only fits one.
+      const upload = (name: string) =>
+        persistUploadedAttachment({
+          attachmentsDir,
+          ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+          name,
+          dataUrl: dataUrl("text/plain", "1234"),
+          totalBudgetBytes: 6,
+        }).pipe(Effect.exit);
+
+      const results = yield* Effect.all([upload("a.log"), upload("b.log")], {
+        concurrency: "unbounded",
+      });
+
+      const written = results.filter((result) => result._tag === "Success");
+      expect(written).toHaveLength(1);
+      expect(
+        NodeFS.readdirSync(NodePath.join(attachmentsDir, ATTACHMENT_UPLOADS_DIRECTORY)),
+      ).toHaveLength(1);
+    }),
+  );
+
+  it.effect("retires uploads past the TTL and stops counting them", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const stale = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+        name: "stale.log",
+        dataUrl: dataUrl("text/plain", "1234"),
+      });
+
+      // Age the first upload past the TTL, then upload again under a budget that
+      // only fits one file: the stale one has to be retired for this to succeed.
+      const staleSeconds = (FIXED_NOW_MS - ATTACHMENT_UPLOAD_TTL_MS - 60_000) / 1000;
+      NodeFS.utimesSync(stale.path, staleSeconds, staleSeconds);
+      const fresh = yield* persistUploadedAttachment({
+        attachmentsDir,
+        ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+        name: "fresh.log",
+        dataUrl: dataUrl("text/plain", "5678"),
+        totalBudgetBytes: 6,
+        now: FIXED_NOW_MS,
+      });
+
+      expect(NodeFS.existsSync(stale.path)).toBe(false);
+      expect(NodeFS.existsSync(fresh.path)).toBe(true);
+    }),
+  );
+
+  it.effect("refuses to report free space when the uploads directory is unreadable", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const uploadsDir = NodePath.join(attachmentsDir, ATTACHMENT_UPLOADS_DIRECTORY);
+      NodeFS.mkdirSync(uploadsDir);
+      NodeFS.chmodSync(uploadsDir, 0o000);
+
+      const failure = yield* Effect.flip(
+        persistUploadedAttachment({
+          attachmentsDir,
+          ownerId: "0e70cccb-51e2-49af-a022-146fbaeede55",
+          name: "server.log",
+          dataUrl: dataUrl("text/plain", "boom"),
+        }),
+      );
+
+      NodeFS.chmodSync(uploadsDir, 0o755);
+      expect(failure._tag).toBe("AttachmentUploadError");
+    }),
+  );
+
+  it.effect("rejects empty files", () =>
+    Effect.gen(function* () {
+      const attachmentsDir = makeAttachmentsDir();
+      const failure = yield* Effect.flip(
+        persistUploadedAttachment({
+          attachmentsDir,
+          ownerId: "thr_01",
+          name: "empty.log",
+          dataUrl: dataUrl("text/plain", ""),
+        }),
+      );
+
+      expect(failure._tag).toBe("AttachmentUploadError");
+      expect(NodeFS.readdirSync(attachmentsDir)).toEqual([]);
+    }),
+  );
+});

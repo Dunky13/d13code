@@ -13,12 +13,17 @@ import type {
   TurnId,
 } from "@t3tools/contracts";
 import {
+  ATTACHMENT_UPLOAD_MAX_BYTES,
   ProviderDriverKind,
   ProviderInstanceId,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import {
@@ -43,6 +48,8 @@ import {
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
 import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
+import { assetEnvironment } from "../../state/assets";
+import { useAtomCommand } from "../../state/use-atom-command";
 import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
@@ -175,6 +182,7 @@ import {
   BotIcon,
   CircleAlertIcon,
   ListTodoIcon,
+  PaperclipIcon,
   PencilRulerIcon,
   type LucideIcon,
   LockIcon,
@@ -209,6 +217,7 @@ import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
+const ATTACHMENT_UPLOAD_SIZE_LIMIT_LABEL = `${Math.round(ATTACHMENT_UPLOAD_MAX_BYTES / (1024 * 1024))}MB`;
 
 const runtimeModeConfig: Record<
   RuntimeMode,
@@ -638,7 +647,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectSelectionRequired,
     phase,
     isConnecting,
-    isSendBusy,
+    isSendBusy: isSendBusyProp,
     isPreparingWorktree,
     environmentUnavailable,
     activePendingApproval,
@@ -738,6 +747,22 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (store) => store.syncPersistedAttachments,
   );
   const getComposerDraft = useComposerDraftStore((store) => store.getComposerDraft);
+
+  const uploadComposerAttachment = useAtomCommand(assetEnvironment.uploadAttachment, {
+    reportFailure: false,
+  });
+  const attachFileInputRef = useRef<HTMLInputElement>(null);
+  const [pendingAttachmentUploads, setPendingAttachmentUploads] = useState(0);
+  const pendingAttachmentUploadsRef = useRef(0);
+  // Uploads resolve against one environment and one draft; both can change while
+  // an upload is in flight, and the resulting path is only valid for the pair it
+  // was created under.
+  const attachmentUploadContextRef = useRef<{
+    environmentId: EnvironmentId;
+    ownerId: string | null;
+  }>({ environmentId, ownerId: null });
+  // An in-flight upload is composer-busy: its link still has to land in this draft.
+  const isSendBusy = isSendBusyProp || pendingAttachmentUploads > 0;
 
   // ------------------------------------------------------------------
   // Model state
@@ -1318,6 +1343,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [composerImages, composerImagesRef]);
 
   useEffect(() => {
+    attachmentUploadContextRef.current = {
+      environmentId,
+      ownerId: activeThreadId ?? draftId,
+    };
+  }, [activeThreadId, draftId, environmentId]);
+
+  useEffect(() => {
     composerTerminalContextsRef.current = composerTerminalContexts;
   }, [composerTerminalContexts, composerTerminalContextsRef]);
 
@@ -1814,6 +1846,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     (event?: { preventDefault: () => void }) => {
       if (noProviderAvailable) {
         event?.preventDefault();
+        return;
+      }
+      // Sending mid-upload would ship the prompt without the file and then drop
+      // the link into whatever draft is current when the upload lands.
+      if (pendingAttachmentUploadsRef.current > 0) {
+        event?.preventDefault();
+        toastManager.add({
+          type: "info",
+          title: "Still attaching files",
+          description: "Send again once the upload finishes.",
+        });
         return;
       }
       onSend(event);
@@ -2337,10 +2380,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const onComposerPaste = (event: React.ClipboardEvent<HTMLElement>) => {
     const files = Array.from(event.clipboardData.files);
     if (files.length === 0) return;
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) return;
     event.preventDefault();
-    addComposerImages(imageFiles);
+    void attachComposerFiles(files);
   };
 
   const onComposerDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
@@ -2374,7 +2415,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     dragDepthRef.current = 0;
     setIsDragOverComposer(false);
     const files = Array.from(event.dataTransfer.files);
-    addComposerImages(files);
+    void attachComposerFiles(files);
     focusComposer();
   };
 
@@ -2399,6 +2440,105 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       prompt.length,
       needsLeadingSpace ? ` ${text}` : text,
     );
+  };
+
+  // Images ride the attachment pipeline (providers see the pixels). Everything
+  // else is uploaded once and handed over as a path so the agent reads it with
+  // its own file tools instead of stuffing a log into the prompt.
+  const attachComposerFiles = async (files: ReadonlyArray<File>) => {
+    if (files.length === 0) return;
+    const images = files.filter((file) => file.type.startsWith("image/"));
+    const documents = files.filter((file) => !file.type.startsWith("image/"));
+    if (images.length > 0) {
+      // addComposerImages stages nothing without a thread; say so rather than
+      // letting the pick look like it worked.
+      if (!activeThreadId) {
+        toastManager.add({
+          type: "error",
+          title: "Unable to attach images",
+          description: "Start the thread before attaching images.",
+        });
+      } else {
+        addComposerImages(images);
+      }
+    }
+    if (documents.length === 0) return;
+
+    const ownerId = activeThreadId ?? draftId;
+    if (!ownerId) {
+      toastManager.add({
+        type: "error",
+        title: "Unable to attach file",
+        description: "Select a project before attaching files.",
+      });
+      return;
+    }
+    const uploadEnvironmentId = environmentId;
+
+    pendingAttachmentUploadsRef.current += 1;
+    setPendingAttachmentUploads((count) => count + 1);
+    try {
+      for (const file of documents) {
+        if (file.size > ATTACHMENT_UPLOAD_MAX_BYTES) {
+          toastManager.add({
+            type: "error",
+            title: "Unable to attach file",
+            description: `'${file.name}' exceeds the ${ATTACHMENT_UPLOAD_SIZE_LIMIT_LABEL} upload limit.`,
+          });
+          continue;
+        }
+        const dataUrl = await readFileAsDataUrl(file).catch(() => null);
+        if (dataUrl === null) {
+          toastManager.add({
+            type: "error",
+            title: "Unable to attach file",
+            description: `'${file.name}' could not be read.`,
+          });
+          continue;
+        }
+        const result = await uploadComposerAttachment({
+          environmentId: uploadEnvironmentId,
+          input: { ownerId, name: file.name || "file", dataUrl },
+        });
+        if (result._tag === "Failure") {
+          if (isAtomCommandInterrupted(result)) continue;
+          const error = squashAtomCommandFailure(result);
+          toastManager.add({
+            type: "error",
+            title: "Unable to attach file",
+            description:
+              error instanceof Error ? error.message : `'${file.name}' could not be uploaded.`,
+          });
+          continue;
+        }
+        // The path only resolves on the host that stored it, and only belongs in
+        // the draft it was attached to.
+        const current = attachmentUploadContextRef.current;
+        if (current.environmentId !== uploadEnvironmentId || current.ownerId !== ownerId) {
+          toastManager.add({
+            type: "error",
+            title: "Attachment discarded",
+            description: `'${file.name}' was uploaded to a different conversation; attach it again here.`,
+          });
+          return;
+        }
+        const inserted = insertComposerTextAtEnd(
+          serializeComposerFileLink(result.value.path, file.name),
+          { ensureLeadingBoundary: true },
+        );
+        if (!inserted) {
+          toastManager.add({
+            type: "error",
+            title: "Unable to add to chat",
+            description: "The composer is busy; try again once it is ready.",
+          });
+          return;
+        }
+      }
+    } finally {
+      pendingAttachmentUploadsRef.current -= 1;
+      setPendingAttachmentUploads((count) => Math.max(0, count - 1));
+    }
   };
 
   // File-tree drags land as mentions. Handled in the capture phase so the
@@ -3154,6 +3294,43 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 }
                 className="flex shrink-0 flex-nowrap items-center justify-end gap-2"
               >
+                <input
+                  ref={attachFileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  data-chat-composer-attach-input="true"
+                  onChange={(event) => {
+                    const files = Array.from(event.target.files ?? []);
+                    event.target.value = "";
+                    void attachComposerFiles(files);
+                  }}
+                />
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        type="button"
+                        size="icon-sm"
+                        variant="ghost"
+                        className="rounded-full text-muted-foreground"
+                        data-chat-composer-attach="true"
+                        aria-label="Attach files"
+                        disabled={
+                          isConnecting ||
+                          isComposerApprovalState ||
+                          pendingUserInputs.length > 0 ||
+                          projectSelectionRequired ||
+                          environmentUnavailable !== null
+                        }
+                        onClick={() => attachFileInputRef.current?.click()}
+                      />
+                    }
+                  >
+                    <PaperclipIcon className="size-4" />
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">Attach images or files</TooltipPopup>
+                </Tooltip>
                 <ComposerFooterPrimaryActions
                   compact={isComposerPrimaryActionsCompact}
                   activeContextWindow={activeContextWindow}

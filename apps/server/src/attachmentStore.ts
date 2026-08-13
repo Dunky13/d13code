@@ -96,6 +96,14 @@ export function resolveAttachmentPathById(input: {
   return null;
 }
 
+/**
+ * Uploaded documents are referenced from message text, never from the structured
+ * attachments on a message row. Keeping them in their own directory means the
+ * revert prune — which is driven by those rows — cannot reach them, without
+ * having to guess a file's kind from its extension.
+ */
+export const ATTACHMENT_UPLOADS_DIRECTORY = "uploads";
+
 export function parseAttachmentIdFromRelativePath(relativePath: string): string | null {
   const normalized = normalizeAttachmentRelativePath(relativePath);
   if (!normalized || normalized.includes("/")) {

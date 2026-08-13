@@ -106,6 +106,8 @@ export interface ThreadComposerProps {
   readonly editorRef?: RefObject<ComposerEditorHandle | null>;
   readonly onChangeDraftMessage: (value: string) => void;
   readonly onPickDraftImages: () => Promise<void>;
+  readonly onPickDraftFiles: () => Promise<void>;
+  readonly fileUploadsPending: boolean;
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
@@ -279,7 +281,8 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const [previewImageUri, setPreviewImageUri] = useState<string | null>(null);
   const hasContent = props.draftMessage.trim().length > 0 || props.draftAttachments.length > 0;
   const isExpanded = isFocused;
-  const canSend = hasContent;
+  // An in-flight upload still owes this draft a file link.
+  const canSend = hasContent && !props.fileUploadsPending;
 
   const onPressImage = useCallback(
     (uri: string) => {
@@ -515,6 +518,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
   const { onChangeDraftMessage, onUpdateInteractionMode, draftMessage, onSendMessage } = props;
 
   const handleSend = useCallback(async () => {
+    // Keyboard submit reaches this directly, so the busy check cannot live only
+    // on the button: sending now would leave the file link for the next message.
+    if (props.fileUploadsPending) return;
     const threadKey = scopedThreadKey(props.environmentId, props.selectedThread.id);
     if (inFlightThreadIdsRef.current.has(threadKey)) return;
     inFlightThreadIdsRef.current.add(threadKey);
@@ -533,6 +539,7 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     onSendMessage,
     props.environmentId,
     props.environmentLabel,
+    props.fileUploadsPending,
     props.selectedThread.id,
     props.selectedThread.title,
   ]);
@@ -674,6 +681,25 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
     ],
     [currentInteractionMode, currentRuntimeMode, providerOptionDescriptors],
   );
+
+  // ── Attachment menu ──────────────────────────────────────
+  const attachMenuActions = useMemo(
+    () => [
+      { id: "attach:photos", title: "Photos" },
+      { id: "attach:files", title: "Files" },
+    ],
+    [],
+  );
+
+  function handleAttachMenuAction(event: string) {
+    if (event === "attach:photos") {
+      void props.onPickDraftImages();
+      return;
+    }
+    if (event === "attach:files") {
+      void props.onPickDraftFiles();
+    }
+  }
 
   // ── Menu handlers ────────────────────────────────────────
   function handleModelMenuAction(event: string) {
@@ -859,12 +885,16 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
                 fadeOpaque={toolbarFadeOpaque}
                 fadeTransparent={toolbarFadeTransparent}
               >
-                <ComposerToolbarButton
-                  accessibilityLabel="Add attachment"
-                  icon="plus"
-                  onPress={() => void props.onPickDraftImages()}
-                  showChevron={false}
-                />
+                <ControlPillMenu
+                  actions={attachMenuActions}
+                  onPressAction={({ nativeEvent }) => handleAttachMenuAction(nativeEvent.event)}
+                >
+                  <ComposerToolbarButton
+                    accessibilityLabel="Add attachment"
+                    icon="plus"
+                    showChevron={false}
+                  />
+                </ControlPillMenu>
                 <ControlPillMenu
                   actions={modelMenuActions}
                   onPressAction={({ nativeEvent }) => handleModelMenuAction(nativeEvent.event)}

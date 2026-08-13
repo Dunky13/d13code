@@ -35,9 +35,9 @@ function encodeMarkdownLinkDestination(path: string): string {
     .replaceAll("\\", "%5C");
 }
 
-export function serializeComposerFileLink(path: string): string {
-  const label = escapeMarkdownLinkLabel(composerFileLinkBasename(path));
-  return `[${label}](${encodeMarkdownLinkDestination(path)})`;
+export function serializeComposerFileLink(path: string, label?: string): string {
+  const linkLabel = escapeMarkdownLinkLabel(label ?? composerFileLinkBasename(path));
+  return `[${linkLabel}](${encodeMarkdownLinkDestination(path)})`;
 }
 
 function clampCursor(text: string, cursor: number): number {
