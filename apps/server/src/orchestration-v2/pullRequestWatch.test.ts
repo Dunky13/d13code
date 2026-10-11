@@ -4,6 +4,7 @@ import type {
   ThreadPullRequestWatch,
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import { forgejoChecks } from "@t3tools/source-control-forgejo/server/forgejoPullRequestJson";
 
 import {
   PULL_REQUEST_WATCH_WAKE_LIMIT,
@@ -287,5 +288,117 @@ describe("pullRequestWatchMessage", () => {
       outcome: "failed",
       summary: "#12: checks failed, new comments",
     });
+  });
+});
+
+describe("Forgejo check watch boundary", () => {
+  const headSha = "aaaaaaaaaa";
+  const updatedAt = "2026-10-10T20:04:50Z";
+  const status = (context: string, value: string) => ({
+    context,
+    status: value,
+    description: null,
+    target_url: null,
+    updated_at: updatedAt,
+  });
+  const seen = watch({ headSha });
+
+  it("wakes when a benchmark finishes alongside conditionally skipped deployment jobs", () => {
+    const checks = forgejoChecks([
+      status("CI / checks", "success"),
+      status("CI / test", "success"),
+      status("CI / perf", "success"),
+      status("CI / deploy-main", "skipped"),
+      status("CI / deploy-vu-production", "skipped"),
+      status("CI / teardown-preview", "skipped"),
+    ]);
+    const finalDetail = detail({ headSha, checks });
+    const completed = evaluatePullRequestWatch(seen, finalDetail, []);
+    assert.deepEqual(completed.changes, [{ kind: "checks-passed", count: 6, required: false }]);
+    assert.isTrue(completed.next.passed);
+    assert.deepEqual(evaluatePullRequestWatch(completed.next, finalDetail, []).changes, []);
+    const stillRunning = evaluatePullRequestWatch(
+      seen,
+      detail({
+        headSha,
+        checks: forgejoChecks([
+          status("CI / perf", "pending"),
+          status("CI / deploy-main", "skipped"),
+        ]),
+      }),
+      [],
+    );
+    assert.deepEqual(stillRunning.changes, []);
+    assert.isFalse(stillRunning.next.passed);
+  });
+
+  it.each(["pending", "cancelled", "failure", "error", "unrecognised"])(
+    "does not report passing while the benchmark status is %s",
+    (value) => {
+      const report = evaluatePullRequestWatch(
+        seen,
+        detail({
+          headSha,
+          checks: forgejoChecks([
+            status("CI / test", "success"),
+            status("CI / perf", value),
+            status("CI / deploy-main", "skipped"),
+          ]),
+        }),
+        [],
+      );
+      assert.isFalse(report.next.passed);
+      assert.isFalse(report.changes.some((change) => change.kind === "checks-passed"));
+      if (["cancelled", "failure", "error"].includes(value)) {
+        assert.strictEqual(report.changes[0]?.kind, "checks-failed");
+      }
+    },
+  );
+
+  it("does not claim validation for an empty or entirely skipped workflow", () => {
+    for (const checks of [
+      [],
+      forgejoChecks([status("CI / test", "skipped"), status("CI / perf", "skipped")]),
+    ]) {
+      assert.deepEqual(evaluatePullRequestWatch(seen, detail({ headSha, checks }), []).changes, []);
+    }
+  });
+
+  it("requires validation within the selected required gate", () => {
+    const skipped = { ...check("required-test", "skipped"), required: true };
+    const advisory = check("advisory-publication", "success");
+    const skippedGate = evaluatePullRequestWatch(
+      seen,
+      detail({ headSha, checks: [skipped, advisory] }),
+      [],
+    );
+    assert.isFalse(skippedGate.next.passed);
+    assert.deepEqual(skippedGate.changes, []);
+    const validatedGate = evaluatePullRequestWatch(
+      seen,
+      detail({
+        headSha,
+        checks: [skipped, { ...check("required-build", "success"), required: true }, advisory],
+      }),
+      [],
+    );
+    assert.isTrue(validatedGate.next.passed);
+    assert.deepEqual(validatedGate.changes, [{ kind: "checks-passed", count: 2, required: true }]);
+  });
+
+  it("does not carry a passed result over to a pushed head with queued checks", () => {
+    const previous = evaluatePullRequestWatch(
+      seen,
+      detail({ headSha, checks: forgejoChecks([status("CI / test", "success")]) }),
+      [],
+    );
+    const pushed = evaluatePullRequestWatch(
+      previous.next,
+      detail({ headSha: "new-head", checks: forgejoChecks([status("CI / test", "pending")]) }),
+      [],
+    );
+    assert.isFalse(pushed.next.passed);
+    assert.deepEqual(pushed.changes, []);
+    assert.strictEqual(pushed.next.headSha, "new-head");
   });
 });

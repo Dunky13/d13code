@@ -220,8 +220,10 @@ export function forgejoChecks(
         description: status.description || null,
         url: status.target_url || null,
         status:
-          status.status === "success"
-            ? "success"
+          status.status === "success" ||
+          status.status === "skipped" ||
+          status.status === "cancelled"
+            ? status.status
             : status.status === "failure" || status.status === "error"
               ? "failure"
               : "pending",
