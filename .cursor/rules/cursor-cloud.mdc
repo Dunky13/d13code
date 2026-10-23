@@ -10,13 +10,13 @@ developed in many places). They cover the pre-provisioned VM environment and non
 
 ## Toolchain
 
-Pre-installed and wired into login shells (`~/.bashrc`/`~/.profile`): Node 24 (via nvm), the global
+Pre-installed and wired into login shells: Node 26.12.1 (via nvm), the global
 `vp` (Vite+) CLI, and its bundled pnpm. `vp` is the package manager + task runner for this repo
 (`vp i`, `vp check`, `vp run typecheck`, `vp test`, `vp run --filter <pkg> <script>`).
 
 - Node gotcha: the base image also ships an older Node on `/exec-daemon` that wins on `PATH` in
-  non-login shells. Run commands in a login shell (`bash -lc '...'`) or prepend
-  `$HOME/.nvm/versions/node/v24.13.1/bin` so Node 24 (`engines.node: ^24.13.1`) is used.
+  non-login shells. Run `nvm install 26.12.1` and `nvm use 26.12.1` in a login shell
+  so Node 26.12.1 (`engines.node: ^26.12.1`) is used.
 - `vp check` also runs the formatter (not just lint); markdown edits must be formatter-clean. Run
   `vp check --fix` before committing.
 
